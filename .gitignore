@@ -1,0 +1,4 @@
+target/
+utils/warp_launcher.cfg
+utils/game_filter.enabled
+*.log

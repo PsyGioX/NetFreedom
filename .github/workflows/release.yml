@@ -1,0 +1,68 @@
+# NetFreedom - open, local, reversible access to the open Internet.
+# Copyright (C) 2026 Sergey (PsyGioX) <https://github.com/PsyGioX>
+# Project home: https://github.com/PsyGioX/NetFreedom
+#
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# Builds the Windows release from a version tag, writes SHA256SUMS.txt and attaches a signed build
+# provenance attestation, so anybody can prove with `gh attestation verify` that the exe came from
+# this repository. NOT RUN YET: try it with a tag such as v3.0.0-test first.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write       # create the release
+  id-token: write       # sign the attestation
+  attestations: write   # store the attestation
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rc.exe (resource compiler) must be on PATH, otherwise the icon is not embedded
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Assemble the package
+        shell: pwsh
+        run: |
+          Copy-Item -Recurse dist/windows package
+          Copy-Item target/release/netfreedom.exe package/netfreedom.exe
+          Copy-Item LICENSE, THIRD-PARTY-NOTICES.md, PHILOSOPHY.md, README.md package/
+          Copy-Item -Recurse docs package/docs
+          Remove-Item package/SHA256SUMS.txt -ErrorAction SilentlyContinue
+          Push-Location package
+          Get-ChildItem -Recurse -File | Where-Object { $_.Name -ne 'SHA256SUMS.txt' } | ForEach-Object {
+            $rel = (Resolve-Path -Relative $_.FullName).Substring(2) -replace '\\','/'
+            "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $rel
+          } | Sort-Object { $_.Substring(66) } | Set-Content -Encoding ascii SHA256SUMS.txt
+          Pop-Location
+          Compress-Archive -Path package/* -DestinationPath "NetFreedom-${{ github.ref_name }}-windows-x64.zip"
+
+      # Free code signing for open source: apply at https://signpath.org, then add the SignPath
+      # action here to sign package/netfreedom.exe BEFORE the checksums are computed.
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            package/netfreedom.exe
+            NetFreedom-${{ github.ref_name }}-windows-x64.zip
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            NetFreedom-${{ github.ref_name }}-windows-x64.zip
+            package/SHA256SUMS.txt
