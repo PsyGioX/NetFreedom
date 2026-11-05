@@ -78,7 +78,7 @@ SmartScreen и антивирусы осторожно относятся к н�
 
 ## Лицензия
 
-Copyright (C) 2026 Sergey (PsyGioX) <https://github.com/PsyGioX>
+Copyright (C) 2026 PsyGioX <https://github.com/PsyGioX>
 
 NetFreedom распространяется по **GNU General Public License v3.0** (`LICENSE`, SPDX: `GPL-3.0-only`),
 заголовок с копирайтом есть в каждом исходном файле. Сторонние компоненты (zapret, материалы
