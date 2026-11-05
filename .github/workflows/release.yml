@@ -40,7 +40,6 @@ jobs:
           Copy-Item -Recurse dist/windows package
           Copy-Item target/release/netfreedom.exe package/netfreedom.exe
           Copy-Item LICENSE, THIRD-PARTY-NOTICES.md, PHILOSOPHY.md, README.md package/
-          Copy-Item -Recurse docs package/docs
           Remove-Item package/SHA256SUMS.txt -ErrorAction SilentlyContinue
           Push-Location package
           Get-ChildItem -Recurse -File | Where-Object { $_.Name -ne 'SHA256SUMS.txt' } | ForEach-Object {

@@ -27,14 +27,21 @@ use std::time::Duration;
 pub struct Target {
     pub name: &'static str,
     pub url: &'static str,
-    /// Body size that must arrive for a pass (0 = only the status code matters).
+    /// Body size that must arrive for a pass (0 = no minimum).
     pub min_bytes: u64,
+    /// Reachability targets (social networks, anti-bot front pages): ANY HTTP answer proves that
+    /// TLS and HTTP got through, even a 403 for a program that is not a browser.
+    pub any_status: bool,
 }
 
 pub const TARGETS: &[Target] = &[
-    Target { name: "Cloudflare 300 KB", url: "https://speed.cloudflare.com/__down?bytes=300000", min_bytes: 300_000 },
-    Target { name: "Discord API", url: "https://discord.com/api/v9/gateway", min_bytes: 1 },
-    Target { name: "YouTube", url: "https://www.youtube.com/generate_204", min_bytes: 0 },
+    Target { name: "Cloudflare 300 KB", url: "https://speed.cloudflare.com/__down?bytes=300000", min_bytes: 300_000, any_status: false },
+    Target { name: "Discord", url: "https://discord.com/api/v9/gateway", min_bytes: 1, any_status: false },
+    Target { name: "YouTube", url: "https://www.youtube.com/generate_204", min_bytes: 0, any_status: false },
+    Target { name: "Instagram", url: "https://www.instagram.com/", min_bytes: 0, any_status: true },
+    Target { name: "X (Twitter)", url: "https://x.com/", min_bytes: 0, any_status: true },
+    Target { name: "Telegram", url: "https://web.telegram.org/", min_bytes: 0, any_status: true },
+    Target { name: "WhatsApp", url: "https://web.whatsapp.com/", min_bytes: 0, any_status: true },
 ];
 
 #[derive(Clone, Debug, PartialEq)]
@@ -55,6 +62,10 @@ impl WebResult {
             format!("{:<20} FAIL  {}", self.name, self.note)
         }
     }
+
+    fn failed(name: &str, note: String) -> Self {
+        Self { name: name.to_owned(), ok: false, code: 0, bytes: 0, secs: 0.0, note }
+    }
 }
 
 /// Parses curl's `-w "%{http_code} %{size_download} %{time_total}"` output.
@@ -66,18 +77,38 @@ pub fn parse_write_out(out: &str) -> Option<(u32, u64, f64)> {
     Some((code, bytes, secs))
 }
 
+/// What a curl exit code means for a bypass test, in plain words. The old "no data (blocked,
+/// reset or timed out)" lumped together causes that need opposite fixes.
+pub fn explain_exit(code: i32, stderr: &str) -> String {
+    let first = stderr.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    let short: String = first.chars().take(110).collect();
+    let revocation = stderr.to_ascii_lowercase().contains("revocation");
+    let what = match code {
+        35 | 60 if revocation => "certificate revocation check failed (not a block: the test itself was disturbed)",
+        6 => "DNS did not resolve the name (DNS blocked or poisoned)",
+        7 => "connection refused or dropped while connecting",
+        28 => "timed out: packets are being dropped (typical for blocking or throttling)",
+        35 => "TLS handshake failed (the connection was cut during the handshake)",
+        52 => "server closed the connection without an answer",
+        55 | 56 => "connection reset while transferring",
+        60 => "certificate was not accepted",
+        _ => "curl failed",
+    };
+    if short.is_empty() { format!("{what} [curl {code}]") } else { format!("{what} [curl {code}: {short}]") }
+}
+
 /// Verdict for one download. `curl_ok`: curl itself exited with 0.
-pub fn judge(t: &Target, curl_ok: bool, code: u32, bytes: u64, secs: f64) -> WebResult {
-    let status_ok = (200..400).contains(&code);
+pub fn judge(t: &Target, curl_ok: bool, code: u32, bytes: u64, secs: f64, why: &str) -> WebResult {
+    let status_ok = if t.any_status { (100..600).contains(&code) } else { (200..400).contains(&code) };
     let ok = curl_ok && status_ok && bytes >= t.min_bytes;
     let note = if ok {
         String::new()
     } else if !curl_ok && (12_000..=24_000).contains(&bytes) && t.min_bytes > 24_000 {
         format!("connection cut after {bytes} bytes: the typical ~16 KB TSPU throttle of Cloudflare-hosted sites")
-    } else if !curl_ok && bytes == 0 {
-        "no data (blocked, reset or timed out)".to_owned()
+    } else if !curl_ok && bytes > 0 {
+        format!("transfer broke after {bytes} bytes; {why}")
     } else if !curl_ok {
-        format!("transfer broke after {bytes} bytes")
+        why.to_owned()
     } else if !status_ok {
         format!("HTTP status {code}")
     } else {
@@ -96,13 +127,19 @@ fn null_device() -> &'static str {
     if cfg!(windows) { "NUL" } else { "/dev/null" }
 }
 
-fn fetch(t: &Target, timeout: Duration) -> WebResult {
+/// Browser-like identity: some front pages answer a bare curl with an error page or nothing.
+const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+
+fn fetch_once(t: &Target, timeout: Duration) -> WebResult {
     let mut cmd = Command::new("curl");
-    cmd.args(["-s", "-o", null_device(), "--connect-timeout", "6", "-m"])
+    // --ssl-no-revoke: curl on Windows (Schannel) asks the CA's OCSP/CRL server whether the
+    // certificate was revoked. Those are separate plain-HTTP requests that blocking and the
+    // strategies themselves break, so a working bypass looked like a failure ("YouTube FAIL" while
+    // the browser, which does not do this, opened it). We test reachability, not PKI.
+    cmd.args(["-sS", "--ssl-no-revoke", "-L", "--max-redirs", "3", "-A", USER_AGENT, "-o", null_device(), "--connect-timeout", "6", "-m"])
         .arg(timeout.as_secs().to_string())
         .args(["-w", "%{http_code} %{size_download} %{time_total}", t.url])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null());
+        .stdin(Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -111,13 +148,27 @@ fn fetch(t: &Target, timeout: Duration) -> WebResult {
     match cmd.output() {
         Ok(o) => {
             let text = String::from_utf8_lossy(&o.stdout);
+            let err = String::from_utf8_lossy(&o.stderr);
+            let why = explain_exit(o.status.code().unwrap_or(-1), &err);
             match parse_write_out(&text) {
-                Some((code, bytes, secs)) => judge(t, o.status.success(), code, bytes, secs),
-                None => WebResult { name: t.name.to_owned(), ok: false, code: 0, bytes: 0, secs: 0.0, note: "curl gave no result".into() },
+                Some((code, bytes, secs)) => judge(t, o.status.success(), code, bytes, secs, &why),
+                None => WebResult::failed(t.name, why),
             }
         }
-        Err(e) => WebResult { name: t.name.to_owned(), ok: false, code: 0, bytes: 0, secs: 0.0, note: format!("cannot run curl: {e}") },
+        Err(e) => WebResult::failed(t.name, format!("cannot run curl: {e}")),
     }
+}
+
+/// One retry for a QUICK failure (a reset): the very first connection after the engine starts is
+/// the flakiest. A timeout is not retried, it already used the whole budget.
+fn fetch(t: &Target, timeout: Duration) -> WebResult {
+    let t0 = std::time::Instant::now();
+    let first = fetch_once(t, timeout);
+    if first.ok || t0.elapsed() > timeout / 2 {
+        return first;
+    }
+    let second = fetch_once(t, timeout);
+    if second.ok { second } else { first }
 }
 
 /// Is `curl` available at all?
@@ -129,11 +180,7 @@ pub fn curl_available() -> bool {
 pub fn probe(timeout: Duration) -> Vec<WebResult> {
     std::thread::scope(|s| {
         let handles: Vec<_> = TARGETS.iter().map(|t| s.spawn(move || fetch(t, timeout))).collect();
-        handles
-            .into_iter()
-            .zip(TARGETS)
-            .map(|(h, t)| h.join().unwrap_or_else(|_| WebResult { name: t.name.to_owned(), ok: false, code: 0, bytes: 0, secs: 0.0, note: "probe crashed".into() }))
-            .collect()
+        handles.into_iter().zip(TARGETS).map(|(h, t)| h.join().unwrap_or_else(|_| WebResult::failed(t.name, "probe crashed".into()))).collect()
     })
 }
 
@@ -152,19 +199,38 @@ mod tests {
     #[test]
     fn the_sixteen_kb_cutoff_is_recognised() {
         let cf = &TARGETS[0];
-        let r = judge(cf, false, 200, 16_384, 10.0);
+        let r = judge(cf, false, 200, 16_384, 10.0, "timed out");
         assert!(!r.ok);
         assert!(r.note.contains("16 KB"), "{}", r.note);
-        assert!(judge(cf, true, 200, 300_000, 0.9).ok);
-        assert!(!judge(cf, true, 200, 5_000, 0.9).ok, "a short body is not a pass");
-        assert!(judge(&TARGETS[2], true, 204, 0, 0.2).ok, "204 without a body passes");
-        assert!(!judge(&TARGETS[2], true, 503, 0, 0.2).ok);
+        assert!(judge(cf, true, 200, 300_000, 0.9, "").ok);
+        assert!(!judge(cf, true, 200, 5_000, 0.9, "").ok, "a short body is not a pass");
+        let yt = TARGETS.iter().find(|t| t.name == "YouTube").unwrap();
+        assert!(judge(yt, true, 204, 0, 0.2, "").ok, "204 without a body passes");
+        assert!(!judge(yt, true, 503, 0, 0.2, "").ok);
+    }
+
+    #[test]
+    fn any_answer_proves_reachability_for_social_networks() {
+        for name in ["Instagram", "X (Twitter)", "Telegram", "WhatsApp"] {
+            let t = TARGETS.iter().find(|t| t.name == name).unwrap();
+            assert!(judge(t, true, 403, 1500, 0.4, "").ok, "{name}: a 403 from an anti-bot wall still means TLS got through");
+            assert!(!judge(t, false, 0, 0, 0.0, "timed out").ok);
+        }
+    }
+
+    #[test]
+    fn failures_say_why() {
+        let t = &TARGETS[1];
+        assert!(judge(t, false, 0, 0, 0.0, &explain_exit(28, "")).note.contains("timed out"));
+        assert!(explain_exit(6, "curl: (6) Could not resolve host").contains("DNS"));
+        assert!(explain_exit(35, "schannel: ... CRYPT_E_NO_REVOCATION_CHECK").contains("[curl 35"));
+        assert!(explain_exit(60, "revocation").contains("revocation"));
     }
 
     #[test]
     fn open_targets_beat_speed() {
         let ok = |s| WebResult { name: "a".into(), ok: true, code: 200, bytes: 1, secs: s, note: String::new() };
-        let bad = WebResult { name: "b".into(), ok: false, code: 0, bytes: 0, secs: 0.0, note: String::new() };
+        let bad = WebResult::failed("b", String::new());
         let slow_but_open = [ok(9.0), ok(9.0), ok(9.0)];
         let fast_but_blocked = [ok(0.1), ok(0.1), bad];
         assert!(score(&slow_but_open) < score(&fast_but_blocked));

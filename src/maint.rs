@@ -399,7 +399,7 @@ pub fn doctor(layout: &Layout) -> Result<(), String> {
     }
     #[cfg(windows)]
     check(Command::new("sc").args(["query", "BFE"]).output().is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("RUNNING")), "Base Filtering Engine service is running", "Base Filtering Engine (BFE) is not running: WinDivert cannot work without it");
-    for f in ["list-general.txt", "ipset-all.txt", "list-google.txt"] {
+    for f in ["list-general.txt", "ipset-all.txt", "list-google.txt", "list-social.txt", "ipset-social.txt"] {
         check(Path::new(&layout.lists).join(f).exists(), &format!("lists/{f}"), &format!("lists/{f} is missing: run `netfreedom lists update`"));
     }
     let mode = classify_ipset(&fs::read_to_string(ipset_file(layout)).unwrap_or_default());

@@ -33,13 +33,22 @@ pub const SERVICES: [&str; 3] = ["zapret", "WinDivert", "WinDivert14"];
 
 pub fn spawn(layout: &Layout, args: &[String], show_console: bool) -> std::io::Result<Child> {
     let window = if show_console { CREATE_NEW_CONSOLE } else { CREATE_NO_WINDOW };
+    // winws writes its complaints (bad option, WinDivert refused, ...) to stdout/stderr; they used
+    // to go nowhere, so a broken strategy looked like "the internet stopped working"
+    let (out, err) = match std::fs::create_dir_all(&layout.utils).and_then(|_| std::fs::File::create(layout.utils.join("winws.log"))) {
+        Ok(f) => match f.try_clone() {
+            Ok(f2) => (Stdio::from(f), Stdio::from(f2)),
+            Err(_) => (Stdio::from(f), Stdio::null()),
+        },
+        Err(_) => (Stdio::null(), Stdio::null()),
+    };
     Command::new(layout.winws_exe())
         .args(args)
         .current_dir(&layout.bin)
         .creation_flags(window | HIGH_PRIORITY_CLASS)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(out)
+        .stderr(err)
         .spawn()
 }
 

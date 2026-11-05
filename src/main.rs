@@ -66,7 +66,7 @@ START OPTIONS
 
 TUNE OPTIONS
       --bypass           judge by real downloads (Cloudflare file, Discord, YouTube) instead of tunnel latency
-      --quick            WARP strategies only (about a third of the time)
+      --quick            WARP goal: WARP strategies only; bypass goal: the 10 most likely strategies (about a third of the time)
       --full             also test the heavy compatibility capture of every bypass strategy
       --only \"a;b\"       only strategies whose name contains one of these words
       --target <host>    what to measure through the tunnel (default 1.1.1.1; a game server IP is best)

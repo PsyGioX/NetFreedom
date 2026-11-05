@@ -87,6 +87,11 @@ impl Layout {
             ("ipset-exclude-user.txt", "203.0.113.113/32\n"),
             ("list-general-user.txt", "# Never leave this file empty\ndomain.example.abc\n"),
             ("list-exclude-user.txt", "domain.example.abc\n"),
+            // Instagram/Meta and X/Twitter: ours, never overwritten by `lists update`. Created here
+            // so that an older install that lacks the file still starts (a missing list file makes
+            // the engine refuse to run).
+            ("list-social.txt", include_str!("../assets/list-social.txt")),
+            ("ipset-social.txt", include_str!("../assets/ipset-social.txt")),
         ] {
             let p = lists.join(name);
             if !p.exists() {
@@ -94,5 +99,31 @@ impl Layout {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_old_install_gets_the_social_list_and_keeps_user_edits() {
+        let root = std::env::temp_dir().join(format!("nf-lists-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let l = Layout::at(root.clone());
+        fs::create_dir_all(root.join("lists")).unwrap();
+        fs::write(root.join("lists").join("list-general-user.txt"), "my.example\n").unwrap();
+        l.ensure_user_lists().unwrap();
+        let social = fs::read_to_string(root.join("lists").join("list-social.txt")).unwrap();
+        for d in ["instagram.com", "cdninstagram.com", "x.com", "twimg.com", "t.co", "telegram.org", "t.me", "whatsapp.com", "whatsapp.net"] {
+            assert!(social.lines().any(|x| x.trim() == d), "{d} missing");
+        }
+        assert!(fs::read_to_string(root.join("lists").join("ipset-social.txt")).unwrap().contains("149.154.160.0/20"));
+        assert_eq!(fs::read_to_string(root.join("lists").join("list-general-user.txt")).unwrap(), "my.example\n", "user files are never overwritten");
+        // a second run must not touch an edited social list either
+        fs::write(root.join("lists").join("list-social.txt"), "mine.example\n").unwrap();
+        l.ensure_user_lists().unwrap();
+        assert_eq!(fs::read_to_string(root.join("lists").join("list-social.txt")).unwrap(), "mine.example\n");
+        let _ = fs::remove_dir_all(&root);
     }
 }

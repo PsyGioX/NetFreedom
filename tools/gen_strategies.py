@@ -33,7 +33,10 @@ Design rules (they are the reason the output differs from the old tables):
      packets of a flow (`cutoff`). Splitting or overlapping unknown payloads can break logins.
   3. WARP strategies do not read ipset/hostlist files at all: with `ipset-all.txt` switched to
      "none" the old LEAN variants silently stopped protecting the handshake.
-  4. No `badseq` with a past sequence number (TSPU started to cut connections that carry it, see
+  4. TLS tricks are applied to TLS ports only, never to port 80: plain HTTP to CDN ranges carries the
+     certificate revocation checks (OCSP/CRL) that Windows and curl make, and splitting those broke
+     "working" connections. Port 80 gets its own small HTTP rule for listed hosts only.
+  5. No `badseq` with a past sequence number (TSPU started to cut connections that carry it, see
      youtubeUnblock#356); sequence tricks use a future number, timestamps (`ts`) or a low TTL.
 
 Usage: python3 tools/gen_strategies.py > src/profiles_data.rs
@@ -55,7 +58,8 @@ WFRAW = (
     "udp.DstPort==4500 or udp.DstPort==8095 or udp.DstPort==8443)"
 )
 
-HOSTS_GENERAL = ["--hostlist={LISTS}list-general.txt", "--hostlist={LISTS}list-general-user.txt"]
+# list-social.txt (Instagram/Meta, X/Twitter) is ours: `lists update` never overwrites it
+HOSTS_GENERAL = ["--hostlist={LISTS}list-general.txt", "--hostlist={LISTS}list-general-user.txt", "--hostlist={LISTS}list-social.txt"]
 EXCLUDES = [
     "--hostlist-exclude={LISTS}list-exclude.txt",
     "--hostlist-exclude={LISTS}list-exclude-user.txt",
@@ -63,6 +67,8 @@ EXCLUDES = [
     "--ipset-exclude={LISTS}ipset-exclude-user.txt",
 ]
 IPSET_ALL = ["--ipset={LISTS}ipset-all.txt"]
+# Telegram data-centre ranges (the desktop/mobile clients connect to IPs, there is no host name to match)
+IPSET_SOCIAL = ["--ipset={LISTS}ipset-social.txt"]
 
 # ------------------------------------------------------------------------ TLS techniques
 # Every technique is a list of winws arguments applied to a TLS-bearing TCP flow.
@@ -113,12 +119,158 @@ TECH = {
 }
 
 
+# Proven techniques of the original 23-profile set, kept verbatim (names follow Flowseal's ALT
+# numbering). Their quirks are deliberate: Russian-domain ClientHellos and a STUN payload as the
+# first fake are what made them work on many providers.
+LEGACY = {
+    "general": [
+        "--dpi-desync=multisplit",
+        "--dpi-desync-split-seqovl=568",
+        "--dpi-desync-split-pos=1",
+        "--dpi-desync-split-seqovl-pattern={BIN}tls_clienthello_4pda_to.bin"
+    ],
+    "alt": [
+        "--dpi-desync=fake,fakedsplit",
+        "--dpi-desync-repeats=6",
+        "--dpi-desync-fooling=ts",
+        "--dpi-desync-fakedsplit-pattern=0x00",
+        "--dpi-desync-fake-tls={BIN}stun.bin",
+        "--dpi-desync-fake-tls={BIN}tls_clienthello_www_google_com.bin"
+    ],
+    "alt10": [
+        "--dpi-desync=fake",
+        "--dpi-desync-repeats=6",
+        "--dpi-desync-fooling=ts",
+        "--dpi-desync-fake-tls={BIN}stun.bin",
+        "--dpi-desync-fake-tls={BIN}tls_clienthello_4pda_to.bin"
+    ],
+    "alt11": [
+        "--dpi-desync=fake,multisplit",
+        "--dpi-desync-split-seqovl=664",
+        "--dpi-desync-split-pos=1",
+        "--dpi-desync-fooling=ts",
+        "--dpi-desync-repeats=8",
+        "--dpi-desync-split-seqovl-pattern={BIN}tls_clienthello_www_sferum_ru.bin",
+        "--dpi-desync-fake-tls={BIN}stun2.bin",
+        "--dpi-desync-fake-tls={BIN}tls_clienthello_www_sferum_ru.bin"
+    ],
+    "alt12": [
+        "--dpi-desync=fake,multisplit",
+        "--dpi-desync-split-seqovl=664",
+        "--dpi-desync-split-pos=1",
+        "--dpi-desync-fooling=ts",
+        "--dpi-desync-repeats=8",
+        "--dpi-desync-split-seqovl-pattern={BIN}tls_clienthello_www_sferum_ru.bin",
+        "--dpi-desync-fake-tls={BIN}stun.bin",
+        "--dpi-desync-fake-tls={BIN}tls_clienthello_www_sferum_ru.bin"
+    ],
+    "alt13": [
+        "--dpi-desync=fake,hostfakesplit",
+        "--dpi-desync-fooling=ts",
+        "--dpi-desync-hostfakesplit-mod=host=mail.ru,altorder=1",
+        "--dpi-desync-repeats=5",
+        "--dpi-desync-fake-tls={BIN}tls_clienthello_sochi_park.bin",
+        "--dpi-desync-fake-tls={BIN}stun2.bin"
+    ],
+    "alt2": [
+        "--dpi-desync=multisplit",
+        "--dpi-desync-split-seqovl=652",
+        "--dpi-desync-split-pos=2",
+        "--dpi-desync-split-seqovl-pattern={BIN}tls_clienthello_www_google_com.bin"
+    ],
+    "alt3": [
+        "--dpi-desync=fake,hostfakesplit",
+        "--dpi-desync-fake-tls-mod=rnd,dupsid,sni=ya.ru",
+        "--dpi-desync-hostfakesplit-mod=host=ya.ru,altorder=1",
+        "--dpi-desync-fooling=ts"
+    ],
+    "alt4": [
+        "--dpi-desync=fake,multisplit",
+        "--dpi-desync-repeats=6",
+        "--dpi-desync-fooling=badseq",
+        "--dpi-desync-badseq-increment=1000",
+        "--dpi-desync-fake-tls={BIN}stun.bin",
+        "--dpi-desync-fake-tls={BIN}tls_clienthello_www_google_com.bin"
+    ],
+    "alt8": [
+        "--dpi-desync=fake",
+        "--dpi-desync-fake-tls-mod=none",
+        "--dpi-desync-repeats=6",
+        "--dpi-desync-fooling=badseq",
+        "--dpi-desync-badseq-increment=2"
+    ],
+    "alt9": [
+        "--dpi-desync=hostfakesplit",
+        "--dpi-desync-repeats=4",
+        "--dpi-desync-fooling=ts,md5sig",
+        "--dpi-desync-hostfakesplit-mod=host=ozon.ru"
+    ],
+    "exp": [
+        "--dpi-desync=fake,multisplit",
+        "--dpi-desync-split-seqovl=480",
+        "--dpi-desync-split-pos=1",
+        "--dpi-desync-fooling=ts",
+        "--dpi-desync-repeats=4",
+        "--dpi-desync-split-seqovl-pattern={BIN}stun2.bin",
+        "--dpi-desync-fake-tls={BIN}tls_clienthello_www_sferum_ru.bin"
+    ],
+    "fta-alt": [
+        "--dpi-desync=fake,fakedsplit",
+        "--dpi-desync-split-pos=1",
+        "--dpi-desync-fooling=badseq",
+        "--dpi-desync-badseq-increment=2",
+        "--dpi-desync-repeats=8",
+        "--dpi-desync-fake-tls-mod=rnd,dupsid,sni=www.google.com"
+    ],
+    "simple-fake-alt": [
+        "--dpi-desync=fake",
+        "--dpi-desync-repeats=6",
+        "--dpi-desync-fooling=badseq",
+        "--dpi-desync-badseq-increment=2",
+        "--dpi-desync-fake-tls={BIN}stun2.bin",
+        "--dpi-desync-fake-tls={BIN}tls_clienthello_www_google_com.bin"
+    ],
+    "simple-fake-alt2": [
+        "--dpi-desync=fake",
+        "--dpi-desync-repeats=6",
+        "--dpi-desync-fooling=ts",
+        "--dpi-desync-fake-tls={BIN}stun2.bin",
+        "--dpi-desync-fake-tls={BIN}tls_clienthello_www_sferum_ru.bin"
+    ],
+    "simple-fake": [
+        "--dpi-desync=fake",
+        "--dpi-desync-repeats=6",
+        "--dpi-desync-fooling=ts",
+        "--dpi-desync-fake-tls={BIN}tls_clienthello_www_google_com.bin"
+    ]
+}
+TECH.update(LEGACY)
+TECH.update({
+    # variations around the family that worked in a real tune report (fake + disorder/dsplit + ts)
+    "disorder-sni": [
+        "--dpi-desync=fake,multidisorder", "--dpi-desync-split-pos=1,sniext+1",
+        "--dpi-desync-fooling=ts", "--dpi-desync-repeats=6", MOD("www.google.com"),
+    ],
+    "disorder-ya": [
+        "--dpi-desync=fake,multidisorder", "--dpi-desync-split-pos=1,midsld",
+        "--dpi-desync-fooling=ts", "--dpi-desync-repeats=6", MOD("ya.ru"),
+    ],
+    "fdisorder": [
+        "--dpi-desync=fake,fakeddisorder", "--dpi-desync-split-pos=1,midsld",
+        "--dpi-desync-fooling=ts", "--dpi-desync-repeats=6", MOD("www.google.com"),
+    ],
+})
+
+
 def quic(repeats):
     return ["--dpi-desync=fake", f"--dpi-desync-repeats={repeats}", f"--dpi-desync-fake-quic={GOOGLE_QUIC}"]
 
 
+HTTP_RULE = ["--dpi-desync=fake,multisplit", "--dpi-desync-split-pos=method+2", "--dpi-desync-fooling=ts", "--dpi-desync-repeats=4"]
+
+
 def classic(tech, r_quic):
-    """Port based capture: the strategy for sites, Discord, YouTube and games (no WARP needed)."""
+    """Port based capture: the strategy for sites, Discord, YouTube, Instagram, X and games."""
     t = TECH[tech]
     segs = [
         # QUIC (HTTP/3) to listed hosts
@@ -131,12 +283,16 @@ def classic(tech, r_quic):
         ["--filter-tcp=2053,2083,2087,2096,8443", "--hostlist-domains=discord.media", *t],
         # YouTube / Google video
         ["--filter-tcp=443", "--hostlist={LISTS}list-google.txt", "--ip-id=zero", *t],
-        # everything else on the general list
-        ["--filter-tcp=80,443", *HOSTS_GENERAL, *EXCLUDES, *t],
+        # everything else on the lists (sites, Instagram, X, ...)
+        ["--filter-tcp=443", *HOSTS_GENERAL, *EXCLUDES, *t],
+        # plain HTTP: listed hosts only, with an HTTP-shaped rule (rule 4)
+        ["--filter-tcp=80", "--filter-l7=http", *HOSTS_GENERAL, *EXCLUDES, *HTTP_RULE],
         # QUIC to blocked ranges
         ["--filter-udp=443", *IPSET_ALL, *EXCLUDES, *quic(r_quic)],
-        # TLS / HTTP to blocked ranges (Cloudflare, Hetzner, OVH, ... the 16 KB cut-off targets)
-        ["--filter-tcp=80,443,8443", *IPSET_ALL, *EXCLUDES, *t],
+        # TLS to blocked ranges (Cloudflare, Hetzner, OVH, ... the 16 KB cut-off targets)
+        ["--filter-tcp=443,8443", *IPSET_ALL, *EXCLUDES, *t],
+        # Telegram clients: by address, TLS port only (rule 4)
+        ["--filter-tcp=443", *IPSET_SOCIAL, *t],
         # game TCP: fakes only, first packets only, real data untouched (rule 2)
         ["--filter-tcp={GF_TCP}", *IPSET_ALL, "--dpi-desync=fake", "--dpi-desync-fooling=ts",
          "--dpi-desync-repeats=4", "--dpi-desync-any-protocol=1", "--dpi-desync-cutoff=n2",
@@ -184,15 +340,35 @@ STRATEGIES = [
                  "--dpi-desync-fake-quic={BIN}quic_initial_rutube_ru.bin"], 12, 3)),
 ]
 BYPASS = [
-    ("balanced", "fake + overlapping split with a harmless SNI (best first try)", "fakesplit", 6),
+    ("balanced", "fake + overlapping split with a harmless SNI (good first try)", "fakesplit", 6),
+    ("disorder", "fake + out-of-order segments (worked in field tests)", "disorder", 11),
+    ("max", "fake + fakedsplit, 11 repeats (worked in field tests)", "max", 11),
+    ("disorder-sni", "fake + out-of-order, split at the SNI extension", "disorder-sni", 6),
+    ("disorder-ya", "fake + out-of-order with a domestic SNI (ya.ru)", "disorder-ya", 6),
+    ("fdisorder", "fake + fake-disorder split (ts)", "fdisorder", 6),
     ("split", "overlapping split only, no fake packets (light, immune to fake bans)", "split", 6),
     ("sni-split", "split at the SNI extension", "sni-split", 6),
-    ("hostfake", "fake ClientHello with a domestic host name", "hostfake", 6),
-    ("disorder", "fake + out-of-order segments", "disorder", 11),
+    ("hostfake", "fake ClientHello with a domestic host name (ya.ru)", "hostfake", 6),
     ("syndata", "payload inside SYN + out-of-order segments (IPv4)", "syndata", 6),
     ("ttl", "fakes that expire before the server (auto TTL)", "ttl", 6),
     ("seqfake", "fake with a future sequence number", "seqfake", 11),
-    ("max", "everything at once: fake + fakedsplit, 11 repeats (compatibility)", "max", 11),
+    # the proven strategies of the original set, kept verbatim (Flowseal's ALT numbering)
+    ("general", "original: overlapping split, 4pda pattern", "general", 6),
+    ("alt", "original ALT: fake + fakedsplit, STUN + Google fakes", "alt", 6),
+    ("alt2", "original ALT2: overlapping split at position 2", "alt2", 6),
+    ("alt3", "original ALT3: hostfakesplit ya.ru", "alt3", 6),
+    ("alt4", "original ALT4: fake + multisplit, future seq 1000", "alt4", 6),
+    ("alt8", "original ALT8: plain fake, future seq 2", "alt8", 6),
+    ("alt9", "original ALT9: hostfakesplit ozon.ru, ts+md5sig", "alt9", 6),
+    ("alt10", "original ALT10: fake with STUN + 4pda ClientHello", "alt10", 6),
+    ("alt11", "original ALT11: fake + multisplit 664, sferum.ru", "alt11", 6),
+    ("alt12", "original ALT12: like ALT11 with a different STUN fake", "alt12", 6),
+    ("alt13", "original ALT13: hostfakesplit mail.ru", "alt13", 6),
+    ("exp", "original EXP: fake + multisplit 480", "exp", 6),
+    ("simple-fake", "original SIMPLE FAKE: plain fake, ts", "simple-fake", 6),
+    ("simple-fake-alt", "original SIMPLE FAKE ALT: plain fake, future seq 2", "simple-fake-alt", 6),
+    ("simple-fake-alt2", "original SIMPLE FAKE ALT2: STUN + sferum.ru fakes", "simple-fake-alt2", 6),
+    ("fta-alt", "original FAKE TLS AUTO ALT: fakedsplit, future seq 2", "fta-alt", 6),
 ]
 for name, desc, tech, r in BYPASS:
     STRATEGIES.append((name, desc, classic(tech, r), None))

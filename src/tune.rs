@@ -151,6 +151,10 @@ impl Scenario {
     }
 }
 
+/// `--quick` for the bypass goal: the strategies that are most often the answer (about a third of
+/// the full run).
+const QUICK_BYPASS: [&str; 10] = ["balanced", "disorder", "max", "disorder-sni", "split", "hostfake", "alt", "alt2", "alt11", "simple-fake"];
+
 /// Builds the list of scenarios for the given options (pure, unit-tested). Every strategy is unique
 /// (the table is deduplicated), so nothing is measured twice.
 pub fn scenarios(a: &TuneArgs) -> Vec<Scenario> {
@@ -162,7 +166,7 @@ pub fn scenarios(a: &TuneArgs) -> Vec<Scenario> {
     }
     for p in profiles::PROFILES.iter().filter(|p| wanted(p)) {
         if a.bypass {
-            if p.is_bypass() {
+            if p.is_bypass() && (!a.quick || QUICK_BYPASS.contains(&p.name)) {
                 v.push(Scenario { label: p.name.into(), profile: Some(p), mode: 1, penalty: 0.0, bypass_goal: true });
             }
         } else if p.is_dedicated_lean() {
@@ -220,10 +224,21 @@ fn evaluate(layout: &Layout, warp: Option<&Warp>, sc: &Scenario, a: &TuneArgs, c
     }
 
     if a.bypass {
-        settle(600);
-        r.web = web::probe(Duration::from_secs(a.timeout_s));
+        settle(1200);
+        // an engine that already died cannot explain "nothing opens": say so, with its own words
+        if sc.profile.is_some() && !backend::engine_running() {
+            let log = backend::engine_log_tail(layout, 3);
+            r.note = format!("the packet engine stopped right after start{}", if log.is_empty() { String::new() } else { format!(": {log}") });
+            teardown(None);
+            return r;
+        }
+        r.web = web::probe(Duration::from_secs(a.timeout_s.min(10)));
         r.connected = r.web.iter().any(|w| w.ok);
         r.score = web::score(&r.web);
+        if sc.profile.is_some() && !backend::engine_running() {
+            r.note = "the packet engine stopped during the test, the result is unreliable".into();
+            r.score += 100.0; // never let an engine that crashed win
+        }
         teardown(None);
         return r;
     }
@@ -415,6 +430,14 @@ pub fn run(layout: &Layout, a: TuneArgs) -> Result<(), String> {
     save_report(layout, &results, &a, started, !stopped);
 
     println!("\n==================== Results (best first) ====================");
+    if a.bypass {
+        let base = results.iter().find(|r| r.scenario.profile.is_none());
+        let broke_all = results.iter().filter(|r| r.scenario.profile.is_some() && r.connected).count() == 0;
+        if broke_all && base.is_some_and(|b| b.connected) {
+            println!("Every strategy opened LESS than no bypass at all. That points at the engine, not at the sites:");
+            println!("check utils/winws.log, antivirus/firewall, and try `netfreedom start --bypass --show-winws -v`.");
+        }
+    }
     if stopped {
         println!("(stopped early: only {} of {} scenarios were measured)", results.len(), total);
     }
@@ -432,6 +455,9 @@ pub fn run(layout: &Layout, a: TuneArgs) -> Result<(), String> {
         println!("Full report: {}", report_path.display());
         return Ok(());
     };
+    for w in best.web.iter().filter(|w| !w.ok) {
+        println!("    still failing with the best result: {}", w.line());
+    }
     println!();
     match best.scenario.profile {
         None if a.bypass => {
@@ -478,16 +504,18 @@ mod tests {
     #[test]
     fn scenario_lists_have_no_duplicates() {
         let all = scenarios(&TuneArgs::default());
-        // baseline + 4 WARP strategies + 9 bypass strategies (low latency)
-        assert_eq!(all.len(), 1 + 4 + 9);
+        // baseline + 4 WARP strategies + 28 bypass strategies (low latency)
+        assert_eq!(all.len(), 1 + 4 + 28);
         assert!(all[0].profile.is_none());
         let labels: std::collections::HashSet<_> = all.iter().map(|s| s.label.clone()).collect();
         assert_eq!(labels.len(), all.len());
         assert_eq!(scenarios(&TuneArgs { quick: true, ..Default::default() }).len(), 1 + 4);
-        assert_eq!(scenarios(&TuneArgs { full: true, ..Default::default() }).len(), 1 + 4 + 18);
+        assert_eq!(scenarios(&TuneArgs { full: true, ..Default::default() }).len(), 1 + 4 + 56);
         let b = scenarios(&TuneArgs { bypass: true, ..Default::default() });
-        assert_eq!(b.len(), 1 + 9, "bypass goal: baseline + the 9 bypass strategies, no WARP strategies");
+        assert_eq!(b.len(), 1 + 28, "bypass goal: baseline + the 28 bypass strategies, no WARP strategies");
         assert!(b.iter().skip(1).all(|s| s.bypass_goal && s.profile.unwrap().is_bypass()));
+        let q = scenarios(&TuneArgs { bypass: true, quick: true, ..Default::default() });
+        assert_eq!(q.len(), 1 + QUICK_BYPASS.len(), "every quick name must exist in the table");
         let only = scenarios(&TuneArgs { only: vec!["split".into()], ..Default::default() });
         assert!(only.iter().all(|s| s.label.contains("split")), "no baseline when filtering");
     }

@@ -45,6 +45,18 @@ pub fn check_engine(layout: &Layout) -> Result<(), String> {
 }
 
 /// Is an engine of ours already running (so that a second start must be refused)?
+/// Last lines of the engine's own output (winws.log / nfqws log), for failure messages.
+pub fn engine_log_tail(layout: &Layout, lines: usize) -> String {
+    #[cfg(windows)]
+    let path = layout.utils.join("winws.log");
+    #[cfg(unix)]
+    let path = std::path::PathBuf::from("/tmp/netfreedom-nfqws.log");
+    let _ = layout;
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let all: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    all[all.len().saturating_sub(lines)..].join(" | ")
+}
+
 pub fn engine_running() -> bool {
     #[cfg(windows)]
     {

@@ -49,19 +49,22 @@ pub const DEFAULT_PROFILE: &str = "warp";
 pub const DEFAULT_BYPASS: &str = "balanced";
 
 /// Old names (from the BAT/Rust 2.x launchers and their config files) -> current strategies.
+/// "general (ALT2)" is now simply `alt2`; the few that were merged map to their equivalent.
 fn legacy(name: &str) -> Option<&'static str> {
     let l = name.to_ascii_lowercase();
-    Some(match l.as_str() {
-        "general (warp lean)" => "warp",
-        "general" | "general (alt)" | "general (alt2)" | "general (alt3)" | "general (alt9)" => "split",
-        "general (alt4)" | "general (alt6)" => "hostfake",
-        "general (alt5)" | "general (alt7)" | "general (alt11)" | "general (alt13)" => "seqfake",
-        "general (alt8)" | "general (alt10)" => "syndata",
-        "general (alt12)" => "sni-split",
-        "general (exp)" | "general (fake tls auto)" | "general (fake tls auto alt)" | "general (fake tls auto alt2)"
-        | "general (fake tls auto alt3)" => "balanced",
-        "general (simple fake)" | "general (simple fake alt)" | "general (simple fake alt2)" => "ttl",
-        _ => return None,
+    let inner = l.strip_prefix("general (").and_then(|r| r.strip_suffix(')')).map(|r| r.replace(' ', "-"));
+    Some(match inner.as_deref() {
+        None if l == "general" => "general",
+        Some("warp-lean") => "warp",
+        Some("alt6") => "split",
+        Some("alt7") => "sni-split",
+        Some("alt5") | Some("fake-tls-auto-alt2") => "seqfake",
+        Some("fake-tls-auto-alt3") | Some("fake-tls-auto-alt3-") => "balanced",
+        Some("fake-tls-auto") => "disorder",
+        Some("simple-fake") => "simple-fake",
+        Some("fake-tls-auto-alt") => "fta-alt",
+        Some(r) => return PROFILES.iter().find(|p| p.name == r).map(|p| p.name),
+        None => return None,
     })
 }
 
@@ -86,7 +89,7 @@ mod tests {
 
     #[test]
     fn table_is_complete() {
-        assert_eq!(PROFILES.len(), 4 + 9);
+        assert_eq!(PROFILES.len(), 4 + 28);
         assert!(find(DEFAULT_PROFILE).unwrap().is_dedicated_lean());
         assert!(find(DEFAULT_BYPASS).unwrap().is_bypass());
         assert!(find("BALANCED").is_some());
@@ -116,37 +119,78 @@ mod tests {
         }
     }
 
+    fn segments<'a>(a: &'a [&'static str]) -> Vec<&'a [&'static str]> {
+        let mut segs = Vec::new();
+        let mut start = 0;
+        for (i, x) in a.iter().enumerate() {
+            if *x == "--new" {
+                segs.push(&a[start..i]);
+                start = i + 1;
+            }
+        }
+        segs.push(&a[start..]);
+        segs
+    }
+
     #[test]
     fn no_past_sequence_fooling() {
-        // youtubeUnblock#356: TSPU drops connections that carry fakes with a sequence in the past
+        // youtubeUnblock#356: TSPU drops connections that carry fakes with a sequence in the past,
+        // and `badseq` WITHOUT an explicit increment means exactly that (default -10000)
         for p in PROFILES {
-            for a in p.lean.into_iter().chain(p.classic).flatten() {
-                if let Some(v) = a.strip_prefix("--dpi-desync-badseq-increment=") {
-                    assert!(v.parse::<i64>().unwrap() > 0, "{}: badseq must point to the future", p.name);
-                }
-                assert!(*a != "--dpi-desync-fooling=badseq" || p.name == "seqfake");
+            let a: Vec<&str> = p.lean.into_iter().chain(p.classic).flatten().copied().collect();
+            let badseq = a.iter().any(|x| x.starts_with("--dpi-desync-fooling=") && x.contains("badseq"));
+            if badseq {
+                let inc = a.iter().find_map(|x| x.strip_prefix("--dpi-desync-badseq-increment=")).unwrap_or_else(|| panic!("{}: badseq without an increment", p.name));
+                assert!(inc.parse::<i64>().unwrap() > 0, "{}: badseq must point to the future", p.name);
             }
+        }
+    }
+
+    #[test]
+    fn tls_tricks_never_touch_port_80() {
+        // plain HTTP to CDN ranges carries the OCSP/CRL revocation checks; splitting them with a
+        // TLS-shaped trick made "working" HTTPS fail in a real tune report
+        for p in PROFILES.iter().filter(|p| p.is_bypass()) {
+            for s in segments(p.classic.unwrap()) {
+                let desync = s.iter().find(|x| x.starts_with("--dpi-desync=")).copied().unwrap_or("");
+                let tls_trick = ["multisplit", "multidisorder", "fakedsplit", "fakeddisorder", "hostfakesplit", "syndata"].iter().any(|m| desync.contains(m));
+                let tcp = s.iter().find_map(|x| x.strip_prefix("--filter-tcp="));
+                if let (true, Some(ports)) = (tls_trick, tcp) {
+                    if s.contains(&"--filter-l7=http") {
+                        continue; // the dedicated HTTP rule
+                    }
+                    assert!(!ports.split(',').any(|p| p == "80"), "{}: {desync} on port 80", p.name);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn instagram_and_x_are_covered_by_every_bypass_strategy() {
+        for p in PROFILES.iter().filter(|p| p.is_bypass()) {
+            let a = p.classic.unwrap();
+            let with_social = segments(a).iter().filter(|s| s.contains(&"--hostlist={LISTS}list-social.txt")).count();
+            assert!(with_social >= 3, "{}: list-social.txt must be in the QUIC, TLS and HTTP list segments, found {with_social}", p.name);
         }
     }
 
     #[test]
     fn game_segments_never_rewrite_real_data() {
         for p in PROFILES.iter().filter(|p| p.is_bypass()) {
-            let a = p.classic.unwrap();
-            let mut segs: Vec<&[&str]> = Vec::new();
-            let mut start = 0;
-            for (i, x) in a.iter().enumerate() {
-                if *x == "--new" {
-                    segs.push(&a[start..i]);
-                    start = i + 1;
-                }
-            }
-            segs.push(&a[start..]);
-            for s in segs.iter().filter(|s| s.iter().any(|x| x.contains("{GF_") && !x.starts_with("--wf-"))) {
+            for s in segments(p.classic.unwrap()).iter().filter(|s| s.iter().any(|x| x.contains("{GF_") && !x.starts_with("--wf-"))) {
                 let desync = s.iter().find(|x| x.starts_with("--dpi-desync=")).unwrap();
                 assert_eq!(*desync, "--dpi-desync=fake", "{}: game segment must only add fakes", p.name);
                 assert!(s.iter().any(|x| x.starts_with("--dpi-desync-cutoff=n")), "{}: game segment needs a cutoff", p.name);
             }
+        }
+    }
+
+    #[test]
+    fn telegram_ranges_are_covered_on_the_tls_port_only() {
+        for p in PROFILES.iter().filter(|p| p.is_bypass()) {
+            let segs = segments(p.classic.unwrap());
+            let seg = segs.iter().find(|s| s.contains(&"--ipset={LISTS}ipset-social.txt")).unwrap_or_else(|| panic!("{}: no Telegram segment", p.name));
+            assert!(seg.contains(&"--filter-tcp=443"), "{}: Telegram segment must be TLS port only", p.name);
         }
     }
 
