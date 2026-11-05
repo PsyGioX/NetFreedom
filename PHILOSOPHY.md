@@ -16,4 +16,4 @@
    которые нельзя выполнить: если на вашем соединении ничего не работает, инструмент так и скажет.
 
 ---
-Copyright (C) 2026 PsyGioX <https://github.com/PsyGioX>. GNU GPL v3.0.
+Copyright (C) 2026 Sergey (PsyGioX) <https://github.com/PsyGioX>. GNU GPL v3.0.
