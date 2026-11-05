@@ -73,8 +73,7 @@ python3 tools/gen_strategies.py > src/profiles_data.rs   # пересборка 
 ## Доверие Windows
 
 SmartScreen и антивирусы осторожно относятся к новым неподписанным программам, особенно с драйвером
-перехвата пакетов. Что с этим делать автору и пользователю: [docs/WINDOWS-TRUST.md](docs/WINDOWS-TRUST.md).
-Кратко для пользователя: скачивайте только с Releases, сверяйте `Get-FileHash`, запускайте `netfreedom verify`.
+перехвата пакетов. Кратко для пользователя: скачивайте только с Releases, сверяйте `Get-FileHash`, запускайте `netfreedom verify`.
 
 ## Лицензия
 
