@@ -94,7 +94,7 @@ fn run_powershell_script(body: &str, root: &Path) {
         ui::skip("cannot write a temporary script, Defender exclusions not checked");
         return;
     }
-    let _ = Command::new("powershell")
+    let _ = Command::new(crate::util::system_tool("powershell"))
         .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
         .arg(&file)
         .env("ZW_ROOT", root)
@@ -115,7 +115,7 @@ fn uninstall_warp() -> i32 {
         ui::warn("Non-MSI uninstaller - remove Cloudflare WARP from Windows Settings > Apps");
         return 4;
     };
-    match Command::new("msiexec").args(["/x", guid, "/qn", "/norestart"]).status().ok().and_then(|s| s.code()) {
+    match Command::new(crate::util::system_tool("msiexec")).args(["/x", guid, "/qn", "/norestart"]).status().ok().and_then(|s| s.code()) {
         Some(0) => 0,
         Some(3010) | Some(1641) => 10,
         Some(c) => {
@@ -161,7 +161,7 @@ fn schedule_folder_removal(root: &Path) -> bool {
     let script = format!(
         "ping -n 5 127.0.0.1 >nul & for /l %i in (1,1,10) do @(if exist \"{p}\" (rd /s /q \"{p}\" 2>nul & ping -n 4 127.0.0.1 >nul))"
     );
-    Command::new("cmd")
+    Command::new(crate::util::system_tool("cmd"))
         .raw_arg(format!("/d /s /c \"{script}\""))
         .current_dir(std::env::temp_dir())
         .creation_flags(CREATE_NO_WINDOW)

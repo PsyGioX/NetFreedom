@@ -130,21 +130,28 @@ fn null_device() -> &'static str {
 /// Browser-like identity: some front pages answer a bare curl with an error page or nothing.
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 
+/// `curl` with an absolute path (this program runs elevated, so PATH is not trusted), no console
+/// window, no stdin, HTTPS only (also for redirects) and TLS 1.2+.
+pub fn curl_command() -> Command {
+    let mut cmd = Command::new(crate::util::system_tool("curl"));
+    cmd.args(["--proto", "=https", "--proto-redir", "=https", "--tlsv1.2"]).stdin(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    cmd
+}
+
 fn fetch_once(t: &Target, timeout: Duration) -> WebResult {
-    let mut cmd = Command::new("curl");
+    let mut cmd = curl_command();
     // --ssl-no-revoke: curl on Windows (Schannel) asks the CA's OCSP/CRL server whether the
     // certificate was revoked. Those are separate plain-HTTP requests that blocking and the
     // strategies themselves break, so a working bypass looked like a failure ("YouTube FAIL" while
     // the browser, which does not do this, opened it). We test reachability, not PKI.
     cmd.args(["-sS", "--ssl-no-revoke", "-L", "--max-redirs", "3", "-A", USER_AGENT, "-o", null_device(), "--connect-timeout", "6", "-m"])
         .arg(timeout.as_secs().to_string())
-        .args(["-w", "%{http_code} %{size_download} %{time_total}", t.url])
-        .stdin(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    }
+        .args(["-w", "%{http_code} %{size_download} %{time_total}", t.url]);
     match cmd.output() {
         Ok(o) => {
             let text = String::from_utf8_lossy(&o.stdout);
@@ -161,7 +168,7 @@ fn fetch_once(t: &Target, timeout: Duration) -> WebResult {
 
 /// One retry for a QUICK failure (a reset): the very first connection after the engine starts is
 /// the flakiest. A timeout is not retried, it already used the whole budget.
-fn fetch(t: &Target, timeout: Duration) -> WebResult {
+pub fn fetch(t: &Target, timeout: Duration) -> WebResult {
     let t0 = std::time::Instant::now();
     let first = fetch_once(t, timeout);
     if first.ok || t0.elapsed() > timeout / 2 {
@@ -173,7 +180,7 @@ fn fetch(t: &Target, timeout: Duration) -> WebResult {
 
 /// Is `curl` available at all?
 pub fn curl_available() -> bool {
-    Command::new("curl").arg("--version").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
+    curl_command().arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
 }
 
 /// Runs every target at the same time (the slowest one decides how long this takes).

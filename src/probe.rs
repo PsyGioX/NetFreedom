@@ -22,6 +22,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
 use crate::stats::{self, Summary, Verdict};
+pub use os::Pinger;
 use crate::ui;
 use crate::util::fmt_ms;
 
@@ -200,14 +201,21 @@ mod os {
 
 // -------------------------------------------------------------------------------- measuring
 
+/// Probes sent and discarded before measuring. One is not enough: a fresh QUIC/MASQUE tunnel needs
+/// a few packets before the route, the neighbour and the NAT entries are all warm, and those
+/// first round-trips made every run after a (re)start look worse than the steady state.
+const WARMUP: u32 = 3;
+
 /// Quiet measurement: round-trip times (ms) of the replies that arrived, in order.
 /// `Err` only if the ICMP socket cannot be opened.
 pub fn measure_icmp(ip: Ipv4Addr, o: &Options) -> Result<Vec<f64>, String> {
     let mut p = os::Pinger::new(ip, o.timeout_ms).ok_or("cannot open an ICMP socket (on Linux run as root or allow ping_group_range)")?;
     if o.warmup {
         // The first packet through a fresh tunnel pays route/cache setup and would inflate max/jitter.
-        let _ = p.ping();
-        std::thread::sleep(Duration::from_millis(o.interval_ms));
+        for _ in 0..WARMUP {
+            let _ = p.ping();
+            std::thread::sleep(Duration::from_millis(o.interval_ms.min(250)));
+        }
     }
     let mut times = Vec::with_capacity(o.count as usize);
     for i in 1..=o.count {
@@ -225,6 +233,12 @@ pub fn measure_icmp(ip: Ipv4Addr, o: &Options) -> Result<Vec<f64>, String> {
 pub fn measure_tcp(ip: Ipv4Addr, port: u16, o: &Options) -> Vec<f64> {
     let addr = SocketAddr::new(IpAddr::V4(ip), port);
     let mut times = Vec::with_capacity(o.count as usize);
+    if o.warmup {
+        for _ in 0..WARMUP {
+            let _ = TcpStream::connect_timeout(&addr, Duration::from_millis(o.timeout_ms as u64));
+            std::thread::sleep(Duration::from_millis(o.interval_ms.min(250)));
+        }
+    }
     for i in 1..=o.count {
         let t0 = Instant::now();
         if TcpStream::connect_timeout(&addr, Duration::from_millis(o.timeout_ms as u64)).is_ok() {
@@ -253,15 +267,52 @@ impl Via {
     }
 }
 
-/// ICMP first; if nothing answers (filtered) fall back to TCP connect timing.
-pub fn measure(target: &str, o: &Options) -> Result<(Summary, Via), String> {
+/// One probe of `ip:443` (used by the live monitor when ICMP is filtered).
+pub fn tcp_sample(ip: Ipv4Addr, timeout_ms: u32) -> Option<f64> {
+    let t0 = Instant::now();
+    TcpStream::connect_timeout(&SocketAddr::new(IpAddr::V4(ip), 443), Duration::from_millis(timeout_ms as u64)).ok()?;
+    Some(t0.elapsed().as_secs_f64() * 1000.0)
+}
+
+/// Which probe a whole comparison uses. `tune` fixes one for ALL scenarios: ICMP and TCP-connect
+/// numbers are not comparable, and a scenario that silently fell back to the other one used to be
+/// ranked against the rest as if they were the same thing.
+pub fn detect_method(target: &str) -> Option<Via> {
+    let ip = resolve_v4(target)?;
+    let o = Options { count: 4, interval_ms: 150, warmup: false, tunnel_stats: false, ..Options::default() };
+    let icmp = measure_icmp(ip, &o).unwrap_or_default();
+    if icmp.len() >= 2 {
+        return Some(Via::Icmp);
+    }
+    (measure_tcp(ip, 443, &o).len() >= 2).then_some(Via::Tcp443)
+}
+
+/// Measures with `via` if given; otherwise ICMP first and, if nothing answers (filtered), TCP.
+pub fn measure_with(target: &str, o: &Options, via: Option<Via>) -> Result<(Summary, Via), String> {
     let ip = resolve_v4(target).ok_or_else(|| format!("cannot resolve an IPv4 address for \"{target}\""))?;
-    let icmp = measure_icmp(ip, o).unwrap_or_default();
-    if let Some(s) = stats::summarize(&icmp, o.count) {
-        return Ok((s, Via::Icmp));
+    if via != Some(Via::Tcp443) {
+        let icmp = measure_icmp(ip, o).unwrap_or_default();
+        if let Some(s) = stats::summarize(&icmp, o.count) {
+            return Ok((s, Via::Icmp));
+        }
+        if via == Some(Via::Icmp) {
+            return Err(format!("no ICMP replies from {target}"));
+        }
     }
     let tcp = measure_tcp(ip, 443, o);
     stats::summarize(&tcp, o.count).map(|s| (s, Via::Tcp443)).ok_or_else(|| format!("no replies from {target} (ICMP and TCP 443)"))
+}
+
+pub fn measure(target: &str, o: &Options) -> Result<(Summary, Via), String> {
+    measure_with(target, o, None)
+}
+
+/// ICMP and TCP-connect to the same host should be in the same ballpark. When they are not, one of
+/// them is answered by something in between (a router that owns the address, a captive portal, a
+/// transparent proxy) and the latency is not the latency of the host.
+pub fn methods_disagree(icmp_median: f64, tcp_median: f64) -> bool {
+    let (lo, hi) = if icmp_median < tcp_median { (icmp_median, tcp_median) } else { (tcp_median, icmp_median) };
+    hi - lo > 25.0 && hi > 2.5 * lo.max(1.0)
 }
 
 /// Interactive probe with the full report (`netfreedom check`).
@@ -270,7 +321,7 @@ pub fn run(target: &str, o: &Options) {
         ui::error(&format!("cannot resolve an IPv4 address for \"{target}\""));
         return;
     };
-    let extra = if o.warmup { " + 1 warm-up" } else { "" };
+    let extra = if o.warmup { " + warm-up" } else { "" };
     ui::cyan(&format!("Probing {target} ({ip}, {} packets{extra})...", o.count));
     let times = match measure_icmp(ip, o) {
         Ok(t) => t,
@@ -310,5 +361,18 @@ pub fn run(target: &str, o: &Options) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod method_tests {
+    use super::*;
+
+    #[test]
+    fn icmp_tcp_disagreement() {
+        assert!(!methods_disagree(20.0, 24.0));
+        assert!(!methods_disagree(2.0, 12.0), "small absolute gaps are noise");
+        assert!(methods_disagree(3.0, 90.0), "a local router answering ICMP for a distant host");
+        assert!(methods_disagree(90.0, 3.0));
     }
 }

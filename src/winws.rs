@@ -88,7 +88,7 @@ pub fn remove_services() -> Vec<(&'static str, Removal)> {
 
 /// Zapret needs TCP timestamps; the classic profiles rely on it (LEAN does not touch TCP).
 pub fn enable_tcp_timestamps() {
-    let _ = Command::new("netsh")
+    let _ = Command::new(crate::util::system_tool("netsh"))
         .args(["interface", "tcp", "set", "global", "timestamps=enabled"])
         .creation_flags(CREATE_NO_WINDOW)
         .stdout(Stdio::null())
@@ -97,7 +97,7 @@ pub fn enable_tcp_timestamps() {
 }
 
 pub fn disable_tcp_timestamps() -> bool {
-    Command::new("netsh")
+    Command::new(crate::util::system_tool("netsh"))
         .args(["interface", "tcp", "set", "global", "timestamps=disabled"])
         .creation_flags(CREATE_NO_WINDOW)
         .stdout(Stdio::null())

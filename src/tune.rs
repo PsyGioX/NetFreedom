@@ -35,6 +35,8 @@ use crate::backend;
 use crate::capture::GameFilter;
 use crate::config::Config;
 use crate::crash;
+use crate::health;
+use crate::session;
 use crate::paths::Layout;
 use crate::probe::{self, Options, Via};
 use crate::profiles::{self, Profile};
@@ -63,6 +65,8 @@ pub struct TuneArgs {
     pub top: usize,
     /// Rank with the plain formula instead of the games one.
     pub plain_score: bool,
+    /// Measuring method fixed for the whole run (set by `run` after a warm-up connection).
+    pub via: Option<probe::Via>,
 }
 
 impl Default for TuneArgs {
@@ -80,6 +84,7 @@ impl Default for TuneArgs {
             no_baseline: false,
             top: 3,
             plain_score: false,
+            via: None,
         }
     }
 }
@@ -204,6 +209,9 @@ fn settle(ms: u64) {
 fn teardown(warp: Option<&Warp>) {
     if let Some(w) = warp {
         w.disconnect();
+        // Wait until the daemon is really down. Reconnecting while the previous session was still
+        // winding down made every later scenario slower or flaky ("worse with each restart").
+        w.wait_disconnected(Duration::from_secs(6));
     }
     backend::native_stop();
     backend::stop_all();
@@ -254,10 +262,25 @@ fn evaluate(layout: &Layout, warp: Option<&Warp>, sc: &Scenario, a: &TuneArgs, c
         teardown(Some(warp));
         return r;
     }
+    // "Connected" from warp-cli is not proof. A scenario only counts if Cloudflare confirms that
+    // our traffic really arrives through WARP; otherwise its numbers describe the plain connection.
+    match health::wait_tunnel_on(warp, Duration::from_secs(a.timeout_s.max(8))) {
+        Ok(t) => r.note = format!("{} {}", t.colo, t.loc).trim().to_owned(),
+        Err(e) => {
+            r.note = format!("not through the tunnel: {e}");
+            teardown(Some(warp));
+            return r;
+        }
+    }
     r.connected = true;
-    settle(700);
+    settle(1500);
     let opts = Options { count, interval_ms: 120, timeout_ms: 1000, warmup: true, tunnel_stats: false };
-    match probe::measure(&a.target, &opts) {
+    match probe::measure_with(&a.target, &opts, a.via) {
+        Ok((s, via)) if !stats::reliable(&s) => {
+            r.note = format!("{}: only {}/{} replies, not enough to rank", r.note, s.received, s.sent);
+            r.summary = Some(s);
+            r.via = Some(via);
+        }
         Ok((s, via)) => {
             r.score = if a.plain_score { stats::score(&s, r.connect_s, sc.penalty) } else { stats::score_games(&s, r.connect_s, sc.penalty) };
             r.summary = Some(s);
@@ -325,7 +348,7 @@ fn save_report(layout: &Layout, results: &[Result1], a: &TuneArgs, started: u64,
     let _ = fs::write(layout.utils.join("tune_report.txt"), report_text(&sorted, a, started, finished));
 }
 
-pub fn run(layout: &Layout, a: TuneArgs) -> Result<(), String> {
+pub fn run(layout: &Layout, mut a: TuneArgs) -> Result<(), String> {
     let warp = if a.bypass {
         if !web::curl_available() {
             return Err("curl was not found: `tune --bypass` downloads real files with it (it ships with Windows 10+ and Linux).".into());
@@ -333,9 +356,6 @@ pub fn run(layout: &Layout, a: TuneArgs) -> Result<(), String> {
         None
     } else {
         let w = Warp::locate().ok_or("Cloudflare WARP is not installed. Run `netfreedom install-warp` first (or use `netfreedom tune --bypass` to test unblocking without WARP).")?;
-        if let Some(note) = w.prepare()? {
-            println!("{note}");
-        }
         Some(w)
     };
     if backend::engine_running() {
@@ -363,7 +383,7 @@ pub fn run(layout: &Layout, a: TuneArgs) -> Result<(), String> {
         return Ok(());
     }
 
-    sys::install_cleanup_handler(if a.bypass { run::cleanup_engine_only } else { run::cleanup_all });
+    session::set_warp_owned(!a.bypass);
     sys::arm_cleanup(true);
     sys::set_graceful(true);
     let started = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
@@ -373,6 +393,78 @@ pub fn run(layout: &Layout, a: TuneArgs) -> Result<(), String> {
             println!("{out}");
         }
         w.launch_app();
+        // Warm-up: the first connection after a start pays for registration, endpoint choice and a
+        // cold route. Without this the first scenario was always unfairly slow, and a re-run after
+        // a restart looked "worse" than the previous one. It also fixes ONE measuring method
+        // (ICMP or TCP) for every scenario so that the numbers are comparable.
+        println!("{}", ui::tr("Прогрев туннеля (результат не учитывается)…", "Warming up the tunnel (not counted)..."));
+        // Warm up UNDER a bypass strategy: where the provider's DPI blocks the WARP handshake
+        // (QUIC/UDP), plain WARP stays "Connecting" forever and tuning would abort before it even
+        // started. The first of the first few strategies that connects wins; plain WARP is only
+        // the last resort (networks where nothing is blocked).
+        let mut ok = false;
+        let mut status = String::new();
+        let mut prepared = false;
+        let candidates: Vec<Option<&Scenario>> = list.iter().filter(|s| s.profile.is_some()).take(5).map(Some).chain(std::iter::once(None)).collect();
+        for cand in candidates {
+            if sys::interrupted() {
+                break;
+            }
+            teardown(Some(w));
+            match cand {
+                Some(sc) => {
+                    let Some(plan) = sc.plan() else { continue };
+                    if let Err(e) = run::launch(layout, &plan, &StartArgs::default(), false, true) {
+                        println!("  {}: engine failed: {}", sc.label, e.lines().next().unwrap_or(""));
+                        continue;
+                    }
+                    println!("  {} {}", ui::tr("со стратегией", "with strategy"), sc.label);
+                }
+                None => println!("  {}", ui::tr("без обхода (последняя попытка)", "plain WARP (last attempt)")),
+            }
+            // daemon check + first-run registration need Cloudflare: do them with the engine up
+            if !prepared {
+                match w.prepare() {
+                    Ok(note) => {
+                        prepared = true;
+                        if let Some(note) = note {
+                            println!("{note}");
+                        }
+                    }
+                    Err(e) => {
+                        status = e;
+                        continue;
+                    }
+                }
+            }
+            let (o, _, st) = run::connect_warp(w, Duration::from_secs(a.timeout_s.max(20)));
+            status = st;
+            if o {
+                ok = true;
+                break;
+            }
+        }
+        if !ok {
+            teardown(Some(w));
+            return Err(format!("WARP does not connect at all ({}). Fix that first, otherwise every scenario would fail.", status.lines().next().unwrap_or("no status").trim()));
+        }
+        match health::wait_tunnel_on(w, Duration::from_secs(20)) {
+            Ok(t) => println!("  warp=on, {} {} {}", ui::tr("дата-центр", "data centre"), t.colo, t.loc),
+            Err(e) => {
+                teardown(Some(w));
+                return Err(format!("WARP says Connected but the traffic does not go through it: {e}"));
+            }
+        }
+        settle(1500);
+        a.via = probe::detect_method(&a.target);
+        match a.via {
+            Some(v) => println!("  {} {}", ui::tr("метод измерения для всех сценариев:", "measuring method for every scenario:"), v.label()),
+            None => {
+                teardown(Some(w));
+                return Err(format!("{} does not answer through the tunnel, neither ICMP nor TCP 443: pass another --target (your game server's IP).", a.target));
+            }
+        }
+        teardown(Some(w));
     }
     println!();
 
@@ -410,7 +502,9 @@ pub fn run(layout: &Layout, a: TuneArgs) -> Result<(), String> {
             let again = evaluate_safe(layout, warp.as_ref(), &sc, &a, a.count * 2);
             ui::say(&format!("  {:<26} {}", sc.label, describe(&again)));
             if again.score.is_finite() {
-                results[i].score = (results[i].score + again.score) / 2.0;
+                // pessimistic on purpose: a strategy that is great once and mediocre the next time
+                // is not what a game needs, so the worse of the two runs decides
+                results[i].score = results[i].score.max(again.score);
             } else {
                 results[i].score = f64::INFINITY; // unstable: worked once, failed the second time
                 results[i].note = "failed the confirmation run".into();

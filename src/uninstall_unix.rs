@@ -170,7 +170,7 @@ pub fn run(layout: &Layout) -> Result<(), String> {
     }
     println!("[3/4] WARP package");
     match (rm_warp, rm_cmd) {
-        (true, Some(c)) => match Command::new(c[0]).args(&c[1..]).status() {
+        (true, Some(c)) => match Command::new(crate::util::system_tool(c[0])).args(&c[1..]).status() {
             Ok(s) if s.success() => ui::ok("package removed"),
             Ok(s) => ui::warn(&format!("{} exited with {s}", c[0])),
             Err(e) => ui::warn(&format!("cannot run {}: {e}", c[0])),

@@ -27,6 +27,19 @@ pub struct Warp {
     app: PathBuf,
 }
 
+pub fn status_is_connected(text: &str) -> bool {
+    text.contains("Status update: Connected")
+}
+
+pub fn status_is_disconnected(text: &str) -> bool {
+    text.contains("Status update: Disconnected") || text.contains("Disconnected")
+}
+
+/// The reason line of a non-connected status (`Reason: ...`), for readable failure messages.
+pub fn status_reason(text: &str) -> String {
+    text.lines().map(str::trim).find(|l| l.to_ascii_lowercase().starts_with("reason")).unwrap_or("").to_owned()
+}
+
 impl Warp {
     #[cfg(windows)]
     pub fn locate() -> Option<Self> {
@@ -38,7 +51,7 @@ impl Warp {
 
     #[cfg(unix)]
     pub fn locate() -> Option<Self> {
-        crate::sys::which("warp-cli").or_else(|| ["/usr/bin/warp-cli", "/bin/warp-cli"].iter().map(PathBuf::from).find(|p| p.is_file())).map(|cli| Self { cli })
+        crate::util::find_in(&crate::util::SYSTEM_DIRS, "warp-cli").map(|cli| Self { cli })
     }
 
     /// Runs `warp-cli <args>` without a console window. Returns (success, combined output).
@@ -73,8 +86,8 @@ impl Warp {
             // without the daemon warp-cli prints "Unable to connect to CloudflareWARP daemon"
             let alive = |s: &Self| !s.run(&["status"]).1.contains("Unable to connect");
             if !alive(self) {
-                if crate::sys::which("systemctl").is_some() {
-                    let _ = Command::new("systemctl").args(["start", "warp-svc"]).status();
+                if crate::util::system_tool("systemctl").is_absolute() {
+                    let _ = Command::new(crate::util::system_tool("systemctl")).args(["start", "warp-svc"]).status();
                 }
                 let t0 = Instant::now();
                 while !alive(self) {
@@ -122,13 +135,40 @@ impl Warp {
         let t0 = Instant::now();
         loop {
             let text = self.run(&["status"]).1;
-            if text.contains("Status update: Connected") {
+            if status_is_connected(&text) {
                 return (true, text);
             }
             if t0.elapsed() >= timeout {
                 return (false, text);
             }
             std::thread::sleep(Duration::from_millis(300));
+        }
+    }
+
+    /// Current `warp-cli status` text.
+    pub fn status_text(&self) -> String {
+        self.run(&["status"]).1
+    }
+
+    /// `warp-cli` says "Connected". That is NOT proof that traffic flows (see `health`).
+    pub fn is_connected(&self) -> bool {
+        status_is_connected(&self.status_text())
+    }
+
+    /// Polls until the daemon reports it is really disconnected (not just "asked to").
+    /// Reconnecting while the previous session is still winding down is what made successive
+    /// attempts slower and flakier.
+    pub fn wait_disconnected(&self, timeout: Duration) -> bool {
+        let t0 = Instant::now();
+        loop {
+            let text = self.status_text();
+            if status_is_disconnected(&text) {
+                return true;
+            }
+            if t0.elapsed() >= timeout {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(250));
         }
     }
 
@@ -140,5 +180,19 @@ impl Warp {
     pub fn close_app(&self) {
         #[cfg(windows)]
         crate::sys::kill_by_name("Cloudflare WARP.exe");
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    #[test]
+    fn status_parsing() {
+        assert!(status_is_connected("Status update: Connected\nNetwork: healthy"));
+        assert!(!status_is_connected("Status update: Disconnected. Reason: Manual Disconnection"));
+        assert!(status_is_disconnected("Status update: Disconnected. Reason: Manual Disconnection"));
+        assert!(!status_is_disconnected("Status update: Connecting"));
+        assert_eq!(status_reason("Status update: Disconnected\nReason: Registration Missing"), "Reason: Registration Missing");
     }
 }

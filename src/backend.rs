@@ -50,7 +50,7 @@ pub fn engine_log_tail(layout: &Layout, lines: usize) -> String {
     #[cfg(windows)]
     let path = layout.utils.join("winws.log");
     #[cfg(unix)]
-    let path = std::path::PathBuf::from("/tmp/netfreedom-nfqws.log");
+    let path = crate::nfqws::log_path();
     let _ = layout;
     let text = std::fs::read_to_string(path).unwrap_or_default();
     let all: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();

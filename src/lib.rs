@@ -24,7 +24,11 @@
 pub mod backend;
 pub mod capture;
 pub mod config;
+pub mod dash;
 pub mod engine;
+pub mod health;
+pub mod monitor;
+pub mod session;
 pub mod nftrules;
 pub mod paths;
 pub mod probe;

@@ -31,10 +31,35 @@ use crate::sys;
 static CHILD: Mutex<Option<Child>> = Mutex::new(None);
 const ACCT: &str = "/proc/sys/net/netfilter/nf_conntrack_acct";
 const STATE: &str = "/run/netfreedom.state";
-const LOG: &str = "/tmp/netfreedom-nfqws.log";
+const LOG_DIR: &str = "/run/netfreedom";
+
+/// Engine output. It lives in a root-owned 0700 directory under /run: the former
+/// `/tmp/netfreedom-nfqws.log` could be pre-created by any local user as a symlink, and the
+/// root-run `File::create` would then overwrite whatever file it pointed to.
+pub fn log_path() -> std::path::PathBuf {
+    std::path::Path::new(LOG_DIR).join("nfqws.log")
+}
+
+fn open_log() -> Result<File, String> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+    let dir = std::path::Path::new(LOG_DIR);
+    let _ = fs::DirBuilder::new().mode(0o700).create(dir);
+    let md = fs::symlink_metadata(dir).map_err(|e| format!("cannot use {LOG_DIR}: {e}"))?;
+    if !md.is_dir() || md.uid() != 0 || md.mode() & 0o022 != 0 {
+        return Err(format!("{LOG_DIR} is not a private directory owned by root: refusing to write there"));
+    }
+    fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(log_path())
+        .map_err(|e| format!("cannot create {}: {e}", log_path().display()))
+}
 
 fn nft_bin() -> Result<std::path::PathBuf, String> {
-    sys::which("nft").or_else(|| ["/usr/sbin/nft", "/sbin/nft"].iter().map(Into::into).find(|p: &std::path::PathBuf| p.is_file()))
+    crate::util::find_in(&crate::util::SYSTEM_DIRS, "nft")
         .ok_or_else(|| "nft not found: install the nftables package".to_string())
 }
 
@@ -86,7 +111,7 @@ fn queue_is_bound() -> bool {
 }
 
 fn log_tail() -> String {
-    let t = fs::read_to_string(LOG).unwrap_or_default();
+    let t = fs::read_to_string(log_path()).unwrap_or_default();
     let lines: Vec<&str> = t.lines().collect();
     lines[lines.len().saturating_sub(6)..].join("\n")
 }
@@ -100,7 +125,7 @@ pub fn start(layout: &Layout, args: &[String], include_lo: bool) -> Result<(), S
     nft_bin()?;
     stop_all(); // never stack on top of a previous run
 
-    let log = File::create(LOG).map_err(|e| format!("cannot create {LOG}: {e}"))?;
+    let log = open_log()?;
     let log2 = log.try_clone().map_err(|e| e.to_string())?;
     let child = Command::new(&exe)
         .arg(format!("--qnum={QNUM}"))
@@ -173,4 +198,29 @@ pub fn stop_all() -> Vec<(String, Outcome)> {
 
 pub fn dump_log() -> String {
     log_tail()
+}
+
+#[cfg(test)]
+mod log_tests {
+    use super::*;
+    use std::os::unix::fs::{MetadataExt, symlink};
+
+    #[test]
+    fn log_is_private_and_never_follows_a_symlink() {
+        if unsafe { libc::geteuid() } != 0 {
+            return; // the log directory lives in /run and belongs to root
+        }
+        let f = open_log().expect("opens in a private root-owned directory");
+        drop(f);
+        assert_eq!(fs::metadata(log_path()).unwrap().mode() & 0o777, 0o600);
+        // a planted symlink must be refused, not followed
+        let victim = std::env::temp_dir().join(format!("nf-victim-{}", std::process::id()));
+        fs::write(&victim, "precious").unwrap();
+        let _ = fs::remove_file(log_path());
+        symlink(&victim, log_path()).unwrap();
+        assert!(open_log().is_err(), "O_NOFOLLOW must refuse the symlink");
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "precious");
+        let _ = fs::remove_file(log_path());
+        let _ = fs::remove_file(&victim);
+    }
 }

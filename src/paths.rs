@@ -21,6 +21,7 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
+#[derive(Clone)]
 pub struct Layout {
     pub root: PathBuf,
     /// `...\bin\` with a trailing separator (templates append file names directly).

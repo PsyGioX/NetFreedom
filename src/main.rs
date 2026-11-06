@@ -17,12 +17,16 @@
 
 use std::io::{self, Write};
 
+use nf::config::Config;
 use nf::crash;
+use nf::dash;
+use nf::health;
 use nf::maint;
 use nf::paths::Layout;
 use nf::probe;
 use nf::profiles;
 use nf::run::{self, StartArgs};
+use nf::session;
 use nf::sys;
 use nf::tune::{self, TuneArgs};
 use nf::ui;
@@ -97,13 +101,15 @@ fn main() {
     sys::console_init();
     let log = Layout::discover().map(|l| l.utils.join("crash.log")).unwrap_or_else(|_| std::env::temp_dir().join("netfreedom-crash.log"));
     crash::install(log.clone());
+    let saved_lang = Layout::discover().map(|l| Config::load_with_legacy(&l.cfg, &l.cfg_legacy).lang).unwrap_or_default();
+    ui::init_lang(&saved_lang);
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (code, pause) = match crash::guard(|| dispatch(&args)) {
         Ok(r) => r,
         Err(msg) if msg.contains("failed printing to std") => (0, false), // closed pipe (`| head`)
         Err(msg) => {
             // a panic must never just close the window: undo what is running, say what happened
-            let _ = crash::guard(run::cleanup_all);
+            let _ = crash::guard(session::cleanup);
             ui::error(&format!("Internal error: {}", msg.lines().next().unwrap_or("unknown")));
             ui::say(&format!("Details were saved to {}. Everything that was running has been stopped.", log.display()));
             (101, true)
@@ -180,6 +186,9 @@ fn dispatch(args: &[String]) -> (i32, bool) {
                     return (1, true);
                 }
             };
+            // One handler for the whole run, installed before any thread exists: Ctrl+C, closing the
+            // window, logoff and shutdown all undo what the session did (it only acts while armed).
+            sys::install_cleanup_handler(session::cleanup);
             match cmd {
                 "start" => start(&layout, rest),
                 "tune" => tune_cmd(&layout, rest),
@@ -221,11 +230,18 @@ fn finish(r: Result<(), String>, pause: bool) -> (i32, bool) {
     }
 }
 
+/// `netfreedom start ...`: starts the session, then hands over to the main menu (which shows the
+/// live status and stops everything). `--headless` keeps the old behaviour: run until stopped.
 fn start(layout: &Layout, rest: &[String]) -> (i32, bool) {
     match StartArgs::parse(rest) {
         Ok(a) => {
+            let headless = a.headless;
             sys::set_title(if a.bypass { "NetFreedom: bypass" } else { "NetFreedom: games via WARP" });
-            finish(run::start(layout, a), false)
+            let r = run::start(layout, a);
+            if headless || r.is_err() || !session::is_active() {
+                return finish(r, false);
+            }
+            menu(layout)
         }
         Err(e) => {
             ui::error(&e);
@@ -250,15 +266,20 @@ fn check(rest: &[String]) {
     let (target, count) = match rest.first() {
         Some(t) => (t.clone(), rest.get(1).and_then(|c| c.parse().ok()).unwrap_or(50)),
         None => {
-            println!("Measures latency, jitter and packet loss to any host.");
-            println!("Run it while WARP is connected to measure the path through the tunnel.");
-            println!("Tip: use the IP of your game server for the most meaningful result.\n");
-            let t = ui::ask("Target IP or host", "1.1.1.1");
-            let c = ui::ask("Number of probes", "50").parse().unwrap_or(50);
+            println!("{}", ui::tr("Измеряет задержку, джиттер и потери до любого узла.", "Measures latency, jitter and packet loss to any host."));
+            println!("{}", ui::tr("Запускайте при включённом WARP, чтобы измерить путь через туннель.", "Run it while WARP is connected to measure the path through the tunnel."));
+            println!("{}\n", ui::tr("Совет: для осмысленного результата укажите IP вашего игрового сервера.", "Tip: use the IP of your game server for the most meaningful result."));
+            let default = Config::load_with_legacy(&Layout::discover().map(|l| l.cfg).unwrap_or_default(), std::path::Path::new("")).target;
+            let default = if default.is_empty() { "1.1.1.1".to_owned() } else { default };
+            let t = ui::ask(ui::tr("IP или имя узла", "Target IP or host"), &default);
+            let c = ui::ask(ui::tr("Число проб", "Number of probes"), "50").parse().unwrap_or(50);
             (t, c)
         }
     };
-    probe::run(&target, &probe::Options { count: count.clamp(1, 1000), ..Default::default() });
+    // Is WARP up right now? Then the tunnel must be PROVEN (trace), not assumed.
+    let expect_tunnel = nf::warp::Warp::locate().is_some_and(|w| w.is_connected());
+    println!("{}", ui::tr("Измеряю…", "Measuring..."));
+    health::print_report(&health::full_check(&target, count.clamp(8, 1000), expect_tunnel));
 }
 
 #[cfg(windows)]
@@ -281,45 +302,202 @@ fn install_warp() {
     println!("{}", uninstall::install_instructions(uninstall::family()));
 }
 
+fn pause_back() {
+    print!("\n{}", ui::tr("Нажмите Enter, чтобы вернуться в главное меню…", "Press Enter to return to the main menu..."));
+    ui::read_line();
+}
+
+fn save_cfg(layout: &Layout, f: impl FnOnce(&mut Config)) {
+    let mut c = Config::load_with_legacy(&layout.cfg, &layout.cfg_legacy);
+    f(&mut c);
+    let _ = c.save(&layout.cfg);
+}
+
+fn current_target(layout: &Layout) -> String {
+    let c = Config::load_with_legacy(&layout.cfg, &layout.cfg_legacy);
+    if c.target.is_empty() { "1.1.1.1".to_owned() } else { c.target }
+}
+
+/// Starts a session from the menu; shows the outcome and waits so that it can be read.
+fn start_from_menu(layout: &Layout, args: &[&str]) {
+    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    match StartArgs::parse(&args) {
+        Ok(a) => {
+            sys::set_title(if a.bypass { "NetFreedom: bypass" } else { "NetFreedom: games via WARP" });
+            if let Err(e) = run::start(layout, a) {
+                ui::error(&e);
+            }
+        }
+        Err(e) => ui::error(&e),
+    }
+    pause_back();
+}
+
+/// Full-screen live status, refreshed every second; Enter returns to the menu.
+fn live_monitor() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    let done = Arc::new(AtomicBool::new(false));
+    let flag = done.clone();
+    let _ = std::thread::Builder::new().name("live-input".into()).spawn(move || {
+        ui::read_line();
+        flag.store(true, Ordering::SeqCst);
+    });
+    ui::clear();
+    while !done.load(Ordering::SeqCst) && session::is_active() {
+        ui::home();
+        dash::print();
+        ui::say(&format!("\n  {}", ui::paint(ui::DIM, ui::tr("Обновляется каждую секунду · Enter — назад в меню", "Refreshes every second · Enter: back to the menu"))));
+        ui::clear_below();
+        for _ in 0..10 {
+            if done.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+    if !done.load(Ordering::SeqCst) {
+        println!("{}", ui::tr("Сессия остановлена. Нажмите Enter…", "The session was stopped. Press Enter..."));
+        while !done.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+}
+
+fn quality_now() {
+    let Some(a) = session::active() else { return };
+    println!("{}", ui::tr("Измеряю (≈10 с)…", "Measuring (~10 s)..."));
+    match a.mode {
+        session::Mode::Warp => health::print_report(&health::full_check(&a.target, 25, true)),
+        session::Mode::Bypass => {
+            let r = nf::web::probe(std::time::Duration::from_secs(12));
+            run::print_web(&r);
+            session::with_health(|h| {
+                h.web = r;
+                h.web_at = Some(std::time::Instant::now());
+            });
+        }
+    }
+}
+
+fn set_game_server(layout: &Layout) {
+    println!("{}", ui::tr("IP (или имя) игрового сервера: по нему монитор считает задержку, джиттер и потери.", "IP (or name) of your game server: the monitor measures latency, jitter and loss to it."));
+    println!("{}", ui::tr("Узнать его можно в консоли игры, в Resource Monitor → Network → TCP/UDP-соединения игры.", "Find it in the game console or in Resource Monitor -> Network."));
+    let t = ui::ask(ui::tr("Сервер", "Server"), &current_target(layout));
+    if probe::resolve_v4(&t).is_none() {
+        ui::error(&format!("{} \"{t}\"", ui::tr("не удалось получить IPv4-адрес для", "cannot resolve an IPv4 address for")));
+        return;
+    }
+    save_cfg(layout, |c| c.target = t.clone());
+    session::set_target(&t);
+    ui::ok(&format!("{}: {t}", ui::tr("Сервер сохранён", "Server saved")));
+}
+
+fn menu_item(key: &str, text: &str, hint: &str) {
+    let hint = if hint.is_empty() { String::new() } else { format!("  {}", ui::paint(ui::DIM, hint)) };
+    ui::say(&format!("  {}  {text}{hint}", ui::paint(ui::CYAN, &ui::paint(ui::BOLD, key))));
+}
+
 fn menu(layout: &Layout) -> (i32, bool) {
     sys::set_title("NetFreedom");
     loop {
-        println!("\n  NetFreedom {}\n", env!("CARGO_PKG_VERSION"));
-        println!("  1. Games via Cloudflare WARP");
-        println!("  2. Unblock sites, YouTube, Discord (no WARP)");
-        println!("  3. Find the best strategy for my provider (tune)");
-        println!("  4. Stop everything");
-        println!("  5. Check ping and packet loss");
-        println!("  6. Diagnostics (doctor)");
-        println!("  7. Tools: lists, ipset, Discord cache, autostart");
-        println!("  8. How to install Cloudflare WARP");
-        println!("  9. About / philosophy");
-        println!("  U. Full uninstall");
-        println!("  0. Exit\n");
-        match ui::choice("Select: ", "1234567890uU89") {
-            '1' => return start(layout, &[]),
-            '2' => return start(layout, &["--bypass".to_string()]),
-            '3' => {
-                let bypass = ui::choice("Tune for [G]ames via WARP or [B]ypass without WARP? ", "GB") == 'B';
+        let active = session::is_active();
+        ui::clear();
+        dash::print();
+        println!();
+        if active {
+            menu_item("1", ui::tr("Остановить всё", "Stop everything"), ui::tr("отключить WARP и движок", "disconnect WARP and the engine"));
+            menu_item("2", ui::tr("Живой мониторинг", "Live monitor"), ui::tr("задержка, потери, туннель в реальном времени", "latency, loss and tunnel in real time"));
+            menu_item("3", ui::tr("Проверить качество сейчас", "Check quality now"), ui::tr("честный тест: сначала проверяет туннель", "an honest test: proves the tunnel first"));
+        } else {
+            menu_item("1", ui::tr("Игры через Cloudflare WARP", "Games via Cloudflare WARP"), ui::tr("снижает пинг и потери в играх", "lower ping and loss in games"));
+            menu_item("2", ui::tr("Разблокировка сайтов, YouTube, Discord", "Unblock sites, YouTube, Discord"), ui::tr("без WARP", "no WARP"));
+            menu_item("3", ui::tr("Подобрать лучшую стратегию (tune)", "Find the best strategy (tune)"), ui::tr("тестирует всё на вашем соединении", "tests everything on your connection"));
+        }
+        menu_item("4", ui::tr("Проверка пинга и потерь", "Check ping and packet loss"), "");
+        menu_item("5", ui::tr("IP игрового сервера", "Game server IP"), &current_target(layout));
+        menu_item("6", ui::tr("Диагностика (doctor)", "Diagnostics (doctor)"), "");
+        menu_item("7", ui::tr("Инструменты: списки, ipset, кэш Discord, автозапуск", "Tools: lists, ipset, Discord cache, autostart"), "");
+        menu_item("8", ui::tr("Как установить Cloudflare WARP", "How to install Cloudflare WARP"), "");
+        menu_item("9", ui::tr("О проекте", "About"), "");
+        menu_item("S", ui::tr("Аварийная остановка", "Emergency stop"), ui::tr("если что-то осталось после сбоя", "if something is left after a crash"));
+        menu_item("L", "Язык / Language", if ui::is_ru() { "RU → EN" } else { "EN → RU" });
+        if !active {
+            menu_item("U", ui::tr("Полное удаление", "Full uninstall"), "");
+        }
+        menu_item("0", ui::tr("Выход", "Exit"), if active { ui::tr("остановит всё", "stops everything") } else { "" });
+        println!();
+        let keys = if active { "123456789SL0" } else { "123456789SLU0" };
+        match (ui::choice(ui::tr("Выбор: ", "Select: "), keys), active) {
+            ('1', true) => {
+                run::stop_session();
+                pause_back();
+            }
+            ('2', true) => live_monitor(),
+            ('3', true) => {
+                quality_now();
+                pause_back();
+            }
+            ('1', false) => start_from_menu(layout, &[]),
+            ('2', false) => start_from_menu(layout, &["--bypass"]),
+            ('3', false) => {
+                let bypass = ui::choice(ui::tr("Подбор для [G] игр через WARP или [B] обхода без WARP? ", "Tune for [G]ames via WARP or [B]ypass without WARP? "), "GB") == 'B';
                 let a: Vec<String> = if bypass { vec!["--bypass".to_string()] } else { Vec::new() };
-                return tune_cmd(layout, &a);
+                let _ = tune_cmd(layout, &a);
+                sys::set_title("NetFreedom");
+                pause_back();
             }
-            '4' => run::stop(),
-            '5' => check(&[]),
-            '6' => {
+            ('4', _) => {
+                check(&[]);
+                pause_back();
+            }
+            ('5', _) => {
+                set_game_server(layout);
+                pause_back();
+            }
+            ('6', _) => {
                 let _ = maint::doctor(layout);
+                pause_back();
             }
-            '7' => tools_menu(layout),
-            '8' => install_warp(),
-            '9' => {
+            ('7', _) => {
+                tools_menu(layout);
+                pause_back();
+            }
+            ('8', _) => {
+                install_warp();
+                pause_back();
+            }
+            ('9', _) => {
                 let _ = io::stdout().write_all(ABOUT.as_bytes());
+                pause_back();
             }
-            'u' | 'U' => {
+            ('S', _) => {
+                run::stop();
+                pause_back();
+            }
+            ('L', _) => {
+                ui::set_ru(!ui::is_ru());
+                let code = if ui::is_ru() { "ru" } else { "en" };
+                save_cfg(layout, |c| c.lang = code.to_owned());
+            }
+            ('U', false) => {
                 if let Err(e) = uninstall::run(layout) {
                     ui::error(&e);
                 }
+                pause_back();
             }
-            _ => return (0, false),
+            _ => {
+                if active {
+                    // closed stdin counts as "yes": never loop forever on a dead console
+                    print!("{} [Y/N]: ", ui::tr("Остановить всё и выйти?", "Stop everything and exit?"));
+                    let yes = ui::read_line_opt().map_or(true, |a| a.chars().next().is_some_and(|c| matches!(ui::fold_key(c).to_ascii_uppercase(), 'Y')));
+                    if !yes {
+                        continue;
+                    }
+                    run::stop_session();
+                }
+                return (0, false);
+            }
         }
     }
 }

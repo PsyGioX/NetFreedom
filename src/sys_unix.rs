@@ -84,9 +84,10 @@ pub fn which(name: &str) -> Option<PathBuf> {
 pub fn relaunch_elevated(args: &[String]) -> bool {
     let Ok(exe) = std::env::current_exe() else { return false };
     for tool in ["sudo", "pkexec"] {
-        if which(tool).is_some() {
+        let path = crate::util::system_tool(tool);
+        if path.is_absolute() {
             println!("Administrator rights are required, re-running with {tool}...");
-            let err = Command::new(tool).arg(&exe).args(args).exec();
+            let err = Command::new(path).arg(&exe).args(args).exec();
             eprintln!("cannot run {tool}: {err}");
         }
     }

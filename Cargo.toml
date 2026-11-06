@@ -17,7 +17,7 @@
 
 [package]
 name = "netfreedom"
-version = "3.1.0"
+version = "3.2.0"
 edition = "2021"
 description = "NetFreedom - open, local, reversible tool for reaching the open Internet from Russia: zapret strategies, Cloudflare WARP and game-aware tuning"
 license = "GPL-3.0-only"

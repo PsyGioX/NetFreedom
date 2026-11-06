@@ -115,17 +115,35 @@ const LIST_FILES: [(&str, &str, usize); 5] = [
 /// not suspiciously short, only printable text.
 pub fn valid_list(text: &str, min_lines: usize) -> bool {
     let lines = text.lines().filter(|l| !l.trim().is_empty()).count();
-    lines >= min_lines && !text.contains("<html") && !text.contains("<!DOCTYPE") && text.chars().all(|c| !c.is_control() || matches!(c, '\n' | '\r' | '\t'))
+    lines >= min_lines
+        && text.len() <= 8_000_000
+        && !text.contains("<html")
+        && !text.contains("<!DOCTYPE")
+        && text.chars().all(|c| !c.is_control() || matches!(c, '\n' | '\r' | '\t'))
+        && text.lines().all(plausible_entry)
+}
+
+/// One line of a list: empty, a `#` comment, or only what a domain / IP / CIDR can consist of.
+/// (Defence in depth: the lists come from a third-party repository and feed a root-run engine.)
+fn plausible_entry(line: &str) -> bool {
+    let l = line.trim();
+    l.is_empty() || l.starts_with('#') || (l.len() <= 253 && l.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '/' | '*')))
+}
+
+/// A refresh that would shrink a list to less than half is more likely truncated or tampered
+/// with than genuine.
+pub fn plausible_update(old_lines: usize, new_lines: usize) -> bool {
+    old_lines < 20 || new_lines * 2 >= old_lines
+}
+
+fn count_lines(p: &Path) -> usize {
+    fs::read_to_string(p).map(|t| t.lines().filter(|l| !l.trim().is_empty()).count()).unwrap_or(0)
 }
 
 fn download(url: &str) -> Result<String, String> {
-    let mut cmd = Command::new("curl");
-    cmd.args(["-sS", "-f", "--connect-timeout", "10", "-m", "60", url]).stdin(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
-    }
+    let mut cmd = crate::web::curl_command();
+    // --max-filesize: a list is a few hundred KB; refuse anything absurd instead of filling the disk
+    cmd.args(["-sS", "-f", "--max-filesize", "8000000", "--connect-timeout", "10", "-m", "60", url]);
     let o = cmd.output().map_err(|e| format!("cannot run curl: {e}"))?;
     if !o.status.success() {
         return Err(String::from_utf8_lossy(&o.stderr).trim().to_owned());
@@ -142,7 +160,8 @@ pub fn lists_update(layout: &Layout) -> Result<(), String> {
     for (remote, local, min) in LIST_FILES {
         let dest = Path::new(&layout.lists).join(local);
         match download(&format!("{UPSTREAM}{remote}")) {
-            Ok(text) if valid_list(&text, min) => {
+            Ok(text) if valid_list(&text, min) && plausible_update(count_lines(&dest), text.lines().filter(|l| !l.trim().is_empty()).count()) => {
+                let _ = fs::copy(&dest, dest.with_extension("txt.bak"));
                 let tmp = dest.with_extension("txt.new");
                 fs::write(&tmp, text).and_then(|_| fs::rename(&tmp, &dest)).map_err(|e| format!("{local}: {e}"))?;
                 ui::ok(&format!("{local} updated"));
@@ -299,7 +318,7 @@ const UNIT_PATH: &str = "/etc/systemd/system/netfreedom.service";
 const TASK: &str = "NetFreedom";
 
 fn run_quiet(prog: &str, args: &[&str]) -> bool {
-    let mut c = Command::new(prog);
+    let mut c = Command::new(crate::util::system_tool(prog));
     c.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     #[cfg(windows)]
     {
@@ -398,7 +417,7 @@ pub fn doctor(layout: &Layout) -> Result<(), String> {
         Err(e) => check(false, "", &format!("packet engine: {}", e.lines().next().unwrap_or(""))),
     }
     #[cfg(windows)]
-    check(Command::new("sc").args(["query", "BFE"]).output().is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("RUNNING")), "Base Filtering Engine service is running", "Base Filtering Engine (BFE) is not running: WinDivert cannot work without it");
+    check(Command::new(crate::util::system_tool("sc")).args(["query", "BFE"]).output().is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("RUNNING")), "Base Filtering Engine service is running", "Base Filtering Engine (BFE) is not running: WinDivert cannot work without it");
     for f in ["list-general.txt", "ipset-all.txt", "list-google.txt", "list-social.txt", "ipset-social.txt"] {
         check(Path::new(&layout.lists).join(f).exists(), &format!("lists/{f}"), &format!("lists/{f} is missing: run `netfreedom lists update`"));
     }
@@ -443,6 +462,9 @@ mod tests {
         assert!(!valid_list("<!DOCTYPE html><title>404</title>", 1));
         assert!(!valid_list("a\nb\n", 5), "too short is suspicious");
         assert!(!valid_list("a\u{0}b\n", 1), "control characters are refused");
+        assert!(!valid_list("example.com\n--flag=$(x)\n", 1), "shell-ish junk is refused");
+        assert!(valid_list("# c\nexample.com\n2001:db8::/32\n*.x-y.org\n", 3));
+        assert!(plausible_update(1000, 900) && !plausible_update(1000, 100) && plausible_update(5, 1));
     }
 
     #[test]

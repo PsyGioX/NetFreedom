@@ -101,6 +101,47 @@ pub fn score_games(s: &Summary, connect_s: f64, penalty: f64) -> f64 {
     s.median + 3.0 * s.jitter + 0.5 * (s.p95 - s.median).max(0.0) + 50.0 * s.loss_pct + 3.0 * connect_s + penalty
 }
 
+/// Enough replies to trust the numbers: at least 5 probes sent and at least half answered.
+/// Below that a "median" is an anecdote, and `tune` must not rank scenarios on it.
+pub fn reliable(s: &Summary) -> bool {
+    s.sent >= 5 && s.received >= 3 && s.received * 2 >= s.sent
+}
+
+/// Rolling window of the latest probes (`None` = lost); feeds the live panel.
+pub struct Window {
+    cap: usize,
+    v: std::collections::VecDeque<Option<f64>>,
+}
+
+impl Window {
+    pub const fn new(cap: usize) -> Self {
+        Self { cap, v: std::collections::VecDeque::new() }
+    }
+    pub fn push(&mut self, t: Option<f64>) {
+        if self.v.len() == self.cap {
+            self.v.pop_front();
+        }
+        self.v.push_back(t);
+    }
+    pub fn len(&self) -> usize {
+        self.v.len()
+    }
+    pub fn clear(&mut self) {
+        self.v.clear();
+    }
+    /// `None` until something answered.
+    pub fn summary(&self) -> Option<Summary> {
+        let times: Vec<f64> = self.v.iter().flatten().copied().collect();
+        summarize(&times, self.v.len() as u32)
+    }
+    pub fn loss_pct(&self) -> f64 {
+        if self.v.is_empty() {
+            return 0.0;
+        }
+        round1(100.0 * self.v.iter().filter(|t| t.is_none()).count() as f64 / self.v.len() as f64)
+    }
+}
+
 /// True when the tail is long enough to deserve a hint about periodic spikes.
 pub fn long_tail(s: &Summary) -> bool {
     s.received > 1 && s.p95 - s.median > 15.0
@@ -109,6 +150,22 @@ pub fn long_tail(s: &Summary) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_and_reliability() {
+        let mut w = Window::new(4);
+        assert!(w.summary().is_none());
+        for t in [Some(10.0), None, Some(12.0), Some(11.0), Some(13.0)] {
+            w.push(t);
+        }
+        assert_eq!(w.len(), 4); // the oldest probe fell out
+        assert_eq!(w.loss_pct(), 25.0);
+        assert_eq!(w.summary().unwrap().received, 3);
+        let few = summarize(&[10.0, 11.0], 20).unwrap();
+        assert!(!reliable(&few), "2 of 20 answers is not a measurement");
+        assert!(reliable(&summarize(&[10.0, 11.0, 12.0, 10.0, 11.0], 6).unwrap()));
+        assert!(!reliable(&summarize(&[10.0, 11.0, 12.0], 3).unwrap()), "3 probes are too few");
+    }
 
     #[test]
     fn basic_statistics() {

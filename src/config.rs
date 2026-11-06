@@ -30,11 +30,15 @@ pub struct Config {
     pub cap: u8,
     pub tcp: String,
     pub udp: String,
+    /// Game server (IP) whose latency / loss is watched; empty = Cloudflare 1.1.1.1.
+    pub target: String,
+    /// `ru` / `en`; empty = auto.
+    pub lang: String,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { profile: String::new(), bypass: String::new(), mode: 1, cap: 1, tcp: String::new(), udp: String::new() }
+        Self { profile: String::new(), bypass: String::new(), mode: 1, cap: 1, tcp: String::new(), udp: String::new(), target: String::new(), lang: String::new() }
     }
 }
 
@@ -51,6 +55,8 @@ impl Config {
                 "cap" => c.cap = v.parse().ok().filter(|m| (1..=2).contains(m)).unwrap_or(1),
                 "tcp" => c.tcp = v.to_owned(),
                 "udp" => c.udp = v.to_owned(),
+                "target" => c.target = v.to_owned(),
+                "lang" => c.lang = v.to_ascii_lowercase(),
                 _ => {}
             }
         }
@@ -59,8 +65,8 @@ impl Config {
 
     pub fn render(&self) -> String {
         format!(
-            "profile={}\nbypass={}\nmode={}\ncap={}\ntcp={}\nudp={}\n",
-            self.profile, self.bypass, self.mode, self.cap, self.tcp, self.udp
+            "profile={}\nbypass={}\nmode={}\ncap={}\ntcp={}\nudp={}\ntarget={}\nlang={}\n",
+            self.profile, self.bypass, self.mode, self.cap, self.tcp, self.udp, self.target, self.lang
         )
     }
 
@@ -74,7 +80,7 @@ impl Config {
     }
 
     pub fn save(&self, path: &Path) -> io::Result<()> {
-        fs::write(path, self.render())
+        crate::util::write_atomic(path, self.render().as_bytes())
     }
 }
 
@@ -84,7 +90,7 @@ mod tests {
 
     #[test]
     fn roundtrip_and_legacy_files() {
-        let c = Config { profile: "warp".into(), bypass: "split".into(), mode: 3, cap: 2, tcp: "80".into(), udp: "3074".into() };
+        let c = Config { profile: "warp".into(), bypass: "split".into(), mode: 3, cap: 2, tcp: "80".into(), udp: "3074".into(), target: "203.0.113.7".into(), lang: "ru".into() };
         assert_eq!(Config::parse(&c.render()), c);
         // file written by the BAT launcher (CRLF, .bat suffix kept as is)
         let old = Config::parse("profile=general (ALT).bat\r\nmode=2\r\ncap=1\r\ntcp=\r\nudp=\r\n");

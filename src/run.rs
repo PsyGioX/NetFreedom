@@ -26,8 +26,10 @@ use std::time::{Duration, Instant};
 use crate::backend::{self, Outcome};
 use crate::capture::{self, expand, GameFilter, Vars};
 use crate::config::Config;
+use crate::health;
+use crate::session::{self, Active, Mode};
+use crate::ui::tr;
 use crate::paths::Layout;
-use crate::probe;
 use crate::profiles::{self, Profile, DEFAULT_BYPASS, DEFAULT_PROFILE, WFRAW};
 use crate::sys;
 use crate::ui;
@@ -83,6 +85,7 @@ impl StartArgs {
     }
 }
 
+#[derive(Clone)]
 pub struct Plan {
     pub profile: &'static Profile,
     pub lean: bool,
@@ -153,18 +156,18 @@ fn select(cfg: &mut Config, a: &StartArgs) -> Result<Plan, String> {
         Some(m) => m,
         None if a.headless => cfg.mode,
         None if a.bypass => {
-            println!("\nGame traffic through the engine:");
-            println!("  1. Off           - sites, YouTube and Discord only (recommended)");
-            println!("  2. All ports     - 1024-65535 TCP+UDP (heavier; for games that are blocked themselves)");
-            println!("  3. Custom ports");
-            ui::ask("Mode", "1").parse().ok().filter(|m| (1..=3).contains(m)).unwrap_or(1)
+            println!("\n{}", tr("Игровой трафик через движок:", "Game traffic through the engine:"));
+            println!("{}", tr("  1. Выкл          - только сайты, YouTube и Discord (рекомендуется)", "  1. Off           - sites, YouTube and Discord only (recommended)"));
+            println!("{}", tr("  2. Все порты     - 1024-65535 TCP+UDP (тяжелее; для заблокированных игр)", "  2. All ports     - 1024-65535 TCP+UDP (heavier; for games that are blocked themselves)"));
+            println!("{}", tr("  3. Свои порты", "  3. Custom ports"));
+            ui::ask(tr("Режим", "Mode"), "1").parse().ok().filter(|m| (1..=3).contains(m)).unwrap_or(1)
         }
         None => {
-            println!("\nSelect capture mode (which ports the packet engine intercepts):");
-            println!("  1. Low latency   - only WARP tunnel ports (recommended, least overhead)");
-            println!("  2. Compatibility - all ports 1024-65535 TCP+UDP (heavier, use if mode 1 fails)");
-            println!("  3. Custom ports\n");
-            ui::ask("Mode", &cfg.mode.to_string()).parse().ok().filter(|m| (1..=3).contains(m)).unwrap_or(1)
+            println!("\n{}", tr("Режим перехвата (какие порты видит движок):", "Select capture mode (which ports the packet engine intercepts):"));
+            println!("{}", tr("  1. Малая задержка   - только порты туннеля WARP (рекомендуется, минимум нагрузки)", "  1. Low latency   - only WARP tunnel ports (recommended, least overhead)"));
+            println!("{}", tr("  2. Совместимость    - все порты 1024-65535 TCP+UDP (тяжелее, если режим 1 не работает)", "  2. Compatibility - all ports 1024-65535 TCP+UDP (heavier, use if mode 1 fails)"));
+            println!("{}\n", tr("  3. Свои порты", "  3. Custom ports"));
+            ui::ask(tr("Режим", "Mode"), &cfg.mode.to_string()).parse().ok().filter(|m| (1..=3).contains(m)).unwrap_or(1)
         }
     };
     cfg.mode = mode;
@@ -243,6 +246,7 @@ pub fn cleanup_all() {
     }
     backend::native_stop();
     backend::stop_all();
+    session::set_warp_owned(false);
 }
 
 /// Cleanup for bypass mode: WARP is not touched (the user may be using it for something else).
@@ -259,42 +263,46 @@ fn cleanup_verbose(had_warp: bool) {
     }
     if had_warp {
         if let Some(w) = Warp::locate() {
-            println!("Disconnecting Cloudflare WARP...");
+            println!("{}", tr("Отключаю Cloudflare WARP…", "Disconnecting Cloudflare WARP..."));
             w.disconnect();
         }
     }
-    println!("Stopping the packet engine...");
+    println!("{}", tr("Останавливаю пакетный движок…", "Stopping the packet engine..."));
     backend::stop_all();
     if had_warp {
         if let Some(w) = Warp::locate() {
             w.close_app();
         }
     }
-    println!("Everything has been stopped.");
+    session::set_warp_owned(false);
+    ui::ok(tr("Всё остановлено.", "Everything has been stopped."));
+}
+
+/// Stops the running session (watchdog, engine, WARP). Used by the menu and by headless mode.
+pub fn stop_session() {
+    let a = session::end();
+    let had_warp = a.as_ref().is_some_and(|a| a.mode == Mode::Warp) || session::warp_owned();
+    cleanup_verbose(had_warp);
 }
 
 /// Connects WARP and waits for `Connected`. Returns (connected, seconds, last status text).
 pub fn connect_warp(warp: &Warp, timeout: Duration) -> (bool, f32, String) {
     let t0 = Instant::now();
+    session::set_warp_owned(true);
     warp.connect();
     let (ok, status) = warp.wait_connected(timeout);
     (ok, t0.elapsed().as_secs_f32(), status)
 }
 
-/// Blocks until the user presses Enter (interactive) or the process is asked to stop (headless).
-fn wait_until_stopped(headless: bool) {
-    if headless {
-        sys::set_graceful(true);
-        while !sys::interrupted() {
-            std::thread::sleep(Duration::from_millis(500));
-        }
-    } else {
-        print!("Press Enter to stop everything...");
-        ui::read_line();
+/// Headless (autostart, service): nobody to ask, run until the process is told to stop.
+fn hold_headless() {
+    sys::set_graceful(true);
+    while !sys::interrupted() {
+        std::thread::sleep(Duration::from_millis(500));
     }
 }
 
-fn print_web(results: &[web::WebResult]) {
+pub fn print_web(results: &[web::WebResult]) {
     for r in results {
         if r.ok {
             ui::ok(&r.line());
@@ -304,60 +312,83 @@ fn print_web(results: &[web::WebResult]) {
     }
 }
 
+fn already_running() -> String {
+    tr(
+        "Пакетный движок уже запущен.\nОстановите его из главного меню (пункт «Остановить») или командой `netfreedom stop`.",
+        "The packet engine is already running.\nStop it from the main menu or with `netfreedom stop`.",
+    )
+    .to_owned()
+}
+
+/// The address whose latency is watched: the player's own game server if they set one.
+pub fn watch_target(cfg: &Config) -> String {
+    if cfg.target.trim().is_empty() { "1.1.1.1".to_owned() } else { cfg.target.trim().to_owned() }
+}
+
+/// Starts the session and returns (the menu takes over). Headless: runs until stopped.
 pub fn start(layout: &Layout, a: StartArgs) -> Result<(), String> {
     if a.bypass {
         return start_bypass(layout, a);
     }
     let warp = Warp::locate().ok_or("Cloudflare WARP is not installed. Run `netfreedom install-warp` first (or use `netfreedom start --bypass` to unblock sites without WARP).")?;
-    if backend::engine_running() {
-        return Err("The packet engine is already running.\nReturn to the existing window and press Enter to stop it, or run `netfreedom stop`.".into());
+    if backend::engine_running() || session::is_active() {
+        return Err(already_running());
     }
     backend::check_engine(layout)?;
-    if let Some(note) = warp.prepare()? {
-        println!("{note}");
-    }
     layout.ensure_user_lists().map_err(|e| format!("cannot prepare lists: {e}"))?;
 
     let mut cfg = Config::load_with_legacy(&layout.cfg, &layout.cfg_legacy);
     let mut plan = select(&mut cfg, &a)?;
     let _ = cfg.save(&layout.cfg);
+    let target = watch_target(&cfg);
 
     let mut compat_tried = !plan.lean && plan.mode == 2;
-    sys::install_cleanup_handler(cleanup_all);
 
     let mut use_native = a.native;
     let connected = loop {
         launch(layout, &plan, &a, use_native, false)?;
         sys::arm_cleanup(true);
 
-        println!("Selecting the MASQUE tunnel protocol...");
+        // Daemon check and (first run) registration talk to Cloudflare, so they come AFTER the
+        // engine: with the WARP endpoints filtered, registering without it fails.
+        match warp.prepare() {
+            Ok(Some(note)) => println!("{note}"),
+            Ok(None) => {}
+            Err(e) => {
+                cleanup_verbose(true);
+                return Err(e);
+            }
+        }
+
+        println!("{}", tr("Выбираю протокол туннеля MASQUE…", "Selecting the MASQUE tunnel protocol..."));
         let (_, out) = warp.set_masque();
         if !out.is_empty() {
             println!("{out}");
         }
         warp.launch_app();
-        println!("Connecting Cloudflare WARP...");
+        println!("{}", tr("Подключаю Cloudflare WARP…", "Connecting Cloudflare WARP..."));
+        session::set_warp_owned(true);
         let (_, out) = warp.connect();
         if !out.is_empty() {
             println!("{out}");
         }
 
-        println!("Waiting for the tunnel (up to 30 s)...");
         let t0 = Instant::now();
-        let (connected, status) = warp.wait_connected(Duration::from_secs(30));
-        println!("{status}");
-        if connected {
-            println!("Connected in {:.1} s.", t0.elapsed().as_secs_f32());
+        let wait = Duration::from_secs(30);
+        let up = ui::wait_spin(tr("Жду туннель", "Waiting for the tunnel"), wait, || warp.is_connected().then_some(()));
+        if up.is_some() {
+            ui::ok(&format!("{} {:.1} {}", tr("WARP подключён за", "WARP connected in"), t0.elapsed().as_secs_f32(), tr("с", "s")));
             break true;
         }
+        let reason = crate::warp::status_reason(&warp.status_text());
 
-        println!("\nWARP did not report Connected.");
+        println!("\n{} {reason}", tr("WARP не сообщил о подключении.", "WARP did not report Connected."));
         if a.headless {
-            // nobody to ask: keep what is running, the tunnel may still come up
+            // nobody to ask: keep what is running, the watchdog keeps trying to reconnect
             break false;
         }
         if backend::native_active() {
-            match ui::choice("[W] retry with winws.exe, [C] continue anyway, [Q] stop everything: ", "WCQ") {
+            match ui::choice(tr("[W] повторить через winws.exe, [C] продолжить, [Q] остановить всё: ", "[W] retry with winws.exe, [C] continue anyway, [Q] stop everything: "), "WCQ") {
                 'Q' => {
                     cleanup_verbose(true);
                     return Ok(());
@@ -371,8 +402,8 @@ pub fn start(layout: &Layout, a: StartArgs) -> Result<(), String> {
                 }
             }
         } else if !compat_tried {
-            println!("Compatibility mode captures all ports and may help on strict networks.");
-            match ui::choice("[R] retry in Compatibility mode, [C] continue anyway, [Q] stop everything: ", "RCQ") {
+            println!("{}", tr("Режим совместимости перехватывает все порты и может помочь в строгих сетях.", "Compatibility mode captures all ports and may help on strict networks."));
+            match ui::choice(tr("[R] повторить в режиме совместимости, [C] продолжить, [Q] остановить всё: ", "[R] retry in Compatibility mode, [C] continue anyway, [Q] stop everything: "), "RCQ") {
                 'Q' => {
                     cleanup_verbose(true);
                     return Ok(());
@@ -389,7 +420,7 @@ pub fn start(layout: &Layout, a: StartArgs) -> Result<(), String> {
                     backend::stop_all();
                 }
             }
-        } else if ui::choice("[C] continue anyway, [Q] stop everything: ", "CQ") == 'Q' {
+        } else if ui::choice(tr("[C] продолжить, [Q] остановить всё: ", "[C] continue anyway, [Q] stop everything: "), "CQ") == 'Q' {
             cleanup_verbose(true);
             return Ok(());
         } else {
@@ -397,24 +428,56 @@ pub fn start(layout: &Layout, a: StartArgs) -> Result<(), String> {
         }
     };
 
-    println!();
-    if connected && !a.no_probe && !a.headless {
-        println!("Quick link quality check through the tunnel...");
-        probe::run("1.1.1.1", &probe::Options { count: 20, ..Default::default() });
-        println!("\nFor your game server use `netfreedom check <server-ip>`.");
+    if connected {
+        verify_and_report(&warp, &target, &a);
     }
-    println!("\nNow start your game or launcher (Steam, Epic, Battle.net, EA, Ubisoft, Riot, ...).");
-    println!("Keep this window open while you play. Closing it also stops everything.");
-    println!("\nWhen you finish, return to this window and press Enter.");
-    wait_until_stopped(a.headless);
-    cleanup_verbose(true);
+
+    session::begin(Active { mode: Mode::Warp, plan, layout: layout.clone(), native: use_native, started: Instant::now(), target });
+    sys::arm_cleanup(true);
+
+    if a.headless {
+        hold_headless();
+        stop_session();
+        return Ok(());
+    }
+    println!("\n{}", tr("Готово. Запускайте игру или лаунчер (Steam, Epic, Battle.net, EA, Ubisoft, Riot…).", "Ready. Start your game or launcher (Steam, Epic, Battle.net, EA, Ubisoft, Riot, ...)."));
+    println!("{}", tr("Это окно можно свернуть. Остановить всё: пункт «Остановить» в меню или просто закрыть окно.", "You can minimise this window. Stop everything from the menu or simply close the window."));
     Ok(())
+}
+
+/// The post-connection test. First PROVE that the traffic goes through the tunnel, then measure.
+fn verify_and_report(warp: &Warp, target: &str, a: &StartArgs) {
+    println!("\n{}", tr("Проверяю, что трафик действительно идёт через туннель…", "Checking that traffic really goes through the tunnel..."));
+    let mut ready = health::wait_tunnel_on(warp, Duration::from_secs(20));
+    if let Err(e) = &ready {
+        ui::warn(&format!("{e}"));
+        println!("{}", tr("Переподключаю WARP один раз…", "Reconnecting WARP once..."));
+        warp.disconnect();
+        warp.wait_disconnected(Duration::from_secs(6));
+        warp.connect();
+        ready = health::wait_tunnel_on(warp, Duration::from_secs(25));
+    }
+    match &ready {
+        Ok(t) => ui::ok(&format!("warp={} · {} {} · IP {}", if t.warp == health::WarpFlag::Plus { "plus" } else { "on" }, tr("дата-центр", "data centre"), t.colo, t.ip)),
+        Err(e) => {
+            ui::warn(&format!("{}: {e}", tr("Туннель НЕ подтверждён", "Tunnel NOT verified")));
+            println!("{}", tr("Результаты ниже могут описывать обычное соединение, а не WARP. Монитор продолжит проверки и переподключения.", "The numbers below may describe your normal connection, not WARP. The monitor keeps checking and reconnecting."));
+        }
+    }
+    if a.no_probe || a.headless {
+        return;
+    }
+    println!("\n{}", tr("Тест качества (≈10 с)…", "Quality test (~10 s)..."));
+    health::print_report(&health::full_check(target, 25, true));
+    if target == "1.1.1.1" {
+        println!("{}", tr("Это задержка до Cloudflare, а не до игрового сервера. Укажите IP сервера в меню (пункт «IP игрового сервера»).", "This is latency to Cloudflare, not to your game server. Set the server IP in the menu."));
+    }
 }
 
 /// Bypass without WARP: engine only.
 fn start_bypass(layout: &Layout, a: StartArgs) -> Result<(), String> {
-    if backend::engine_running() {
-        return Err("The packet engine is already running.\nReturn to the existing window and press Enter to stop it, or run `netfreedom stop`.".into());
+    if backend::engine_running() || session::is_active() {
+        return Err(already_running());
     }
     backend::check_engine(layout)?;
     layout.ensure_user_lists().map_err(|e| format!("cannot prepare lists: {e}"))?;
@@ -422,31 +485,44 @@ fn start_bypass(layout: &Layout, a: StartArgs) -> Result<(), String> {
     let mut cfg = Config::load_with_legacy(&layout.cfg, &layout.cfg_legacy);
     let plan = select(&mut cfg, &a)?;
     let _ = cfg.save(&layout.cfg);
+    let target = watch_target(&cfg);
 
-    sys::install_cleanup_handler(cleanup_engine_only);
     launch(layout, &plan, &a, false, false)?;
     sys::arm_cleanup(true);
 
+    let mut first = Vec::new();
     if !a.no_probe && !a.headless {
         if web::curl_available() {
-            println!("\nChecking that it works (a Cloudflare-hosted file, Discord, YouTube)...");
-            let results = web::probe(Duration::from_secs(12));
-            print_web(&results);
-            if results.iter().any(|r| !r.ok) {
-                println!("\nSomething is still blocked. `netfreedom tune --bypass` tries every strategy on your connection and picks the best.");
+            println!("\n{}", tr("Проверяю, что работает (файл на Cloudflare, Discord, YouTube, соцсети)…", "Checking that it works (a Cloudflare-hosted file, Discord, YouTube, social networks)..."));
+            first = web::probe(Duration::from_secs(12));
+            print_web(&first);
+            if first.iter().any(|r| !r.ok) {
+                println!("\n{}", tr("Что-то всё ещё заблокировано. `netfreedom tune --bypass` проверит все стратегии на вашем соединении и выберет лучшую.", "Something is still blocked. `netfreedom tune --bypass` tries every strategy on your connection and picks the best."));
             }
         } else {
             ui::warn("curl was not found, so the result was not checked.");
         }
     }
-    println!("\nThe bypass is active. Keep this window open; closing it also stops everything.");
-    wait_until_stopped(a.headless);
-    cleanup_verbose(false);
+    session::begin(Active { mode: Mode::Bypass, plan, layout: layout.clone(), native: false, started: Instant::now(), target });
+    if !first.is_empty() {
+        session::with_health(|h| {
+            h.web = first;
+            h.web_at = Some(Instant::now());
+        });
+    }
+    if a.headless {
+        hold_headless();
+        stop_session();
+        return Ok(());
+    }
+    println!("\n{}", tr("Обход активен. Окно можно свернуть; остановить — пункт «Остановить» в меню или закрыть окно.", "The bypass is active. Minimise this window; stop it from the menu or by closing the window."));
     Ok(())
 }
 
 /// `netfreedom stop` - emergency stop.
 pub fn stop() {
+    session::end();
+    session::set_warp_owned(false);
     if let Some(w) = Warp::locate() {
         let (ok, out) = w.disconnect();
         if ok {
