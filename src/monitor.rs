@@ -15,25 +15,29 @@
 // You should have received a copy of the GNU General Public License along with
 // this program. If not, see <https://www.gnu.org/licenses/>.
 
-//! Watchdog of a running session. One thread, one tick per second:
+//! Watchdog of a running session. Two threads, so that a slow check can never stall the latency
+//! samples (before, one thread did everything: a `curl` trace waiting up to 6 s or a `warp-cli`
+//! call left a hole in the "last minute" window right when something was going wrong):
 //!
-//!   * every tick   - one latency sample to the watched host (feeds the live panel: median, jitter, loss
-//!                    over the last minute);
-//!   * every 5 s    - is the packet engine alive (restart it, with a back-off, if not); is WARP still
-//!                    connected (reconnect, with a back-off, if not);
-//!   * every 20 s   - Cloudflare trace: is the traffic REALLY going through the tunnel;
-//!   * every 5 min  - (bypass only) a real download test of the unblocked sites.
+//!   * sampler (1 Hz)   - one latency sample to the watched host (feeds the live panel: median,
+//!                        jitter, loss over the last minute). Falls back from ICMP to TCP 443 when
+//!                        the host does not answer ICMP;
+//!   * watchdog, every 5 s  - is the packet engine alive (restart it, with a back-off, if not); is
+//!                        WARP still connected (reconnect, with a back-off, if not);
+//!   * watchdog, every 20 s - Cloudflare trace: is the traffic REALLY going through the tunnel;
+//!   * watchdog, every 5 min - (bypass only) a real download test of the unblocked sites.
 //!
 //! This is what the commercial game boosters do on the client side: keep measuring the path and
 //! react when it degrades instead of trusting the state that was true at connect time.
 
+use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
 use crate::backend;
 use crate::health;
-use crate::probe;
+use crate::probe::{self, MethodSwitch, Via};
 use crate::run::{self, StartArgs};
-use crate::session::{self, Mode};
+use crate::session::{self, Active, Mode};
 use crate::ui::tr;
 use crate::warp::{self, Warp};
 use crate::web;
@@ -49,12 +53,67 @@ pub fn backoff_secs(attempts: u32) -> u64 {
     15 * u64::from(attempts.clamp(1, 4))
 }
 
+/// Sleeps out the rest of a one-second tick (in 100 ms steps, so that a stop is noticed quickly).
+fn finish_tick(t0: Instant) {
+    while t0.elapsed() < Duration::from_secs(1) && !session::stopping() {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 pub fn run() {
     let Some(a) = session::active() else { return };
-    let warp = if a.mode == Mode::Warp { Warp::locate() } else { None };
+    std::thread::scope(|s| {
+        // Slow checks live on their own thread. If it cannot be spawned the samples still flow.
+        let watchdog = std::thread::Builder::new().name("watchdog".into()).spawn_scoped(s, || watchdog(&a));
+        sampler(&a);
+        if let Ok(h) = watchdog {
+            let _ = h.join();
+        }
+    });
+}
+
+/// Resolves the watched host and opens the ICMP socket for it.
+fn setup(target: &str) -> (Option<Ipv4Addr>, Option<probe::Pinger>) {
+    let ip = probe::resolve_v4(target);
+    let pinger = ip.and_then(|ip| probe::Pinger::new(ip, 1000));
+    session::with_health(|h| h.via = Some(Via::Icmp));
+    (ip, pinger)
+}
+
+fn sampler(a: &Active) {
     let mut cur_target = a.target.clone();
-    let mut ip = probe::resolve_v4(&cur_target);
-    let mut pinger = ip.and_then(|ip| probe::Pinger::new(ip, 1000));
+    let (mut ip, mut pinger) = setup(&cur_target);
+    let mut method = MethodSwitch::new();
+
+    while !session::stopping() {
+        let t0 = Instant::now();
+
+        // the player may point the monitor at another server while the session runs
+        if let Some(t) = session::target().filter(|t| *t != cur_target) {
+            (ip, pinger) = setup(&t);
+            method = MethodSwitch::new();
+            cur_target = t;
+        }
+        let (sample, switched) = match ip {
+            Some(ip) => probe::live_sample(&mut method, || pinger.as_mut().and_then(|p| p.ping()), || probe::tcp_sample(ip, 1000)),
+            None => (None, false),
+        };
+        if switched {
+            // the ICMP probes that were counted as lost were not losses: the host just ignores ping
+            session::with_health(|h| {
+                h.window.clear();
+                h.via = Some(Via::Tcp443);
+            });
+            session::event(tr("Узел не отвечает на ICMP, меряю по TCP 443", "The host ignores ICMP, measuring via TCP 443").to_owned());
+        }
+        session::with_health(|h| h.window.push(sample));
+
+        finish_tick(t0);
+    }
+}
+
+fn watchdog(a: &Active) {
+    let warp = if a.mode == Mode::Warp { Warp::locate() } else { None };
     let mut tick: u64 = 0;
     let mut next_engine_try = Instant::now();
     let mut next_reconnect = Instant::now();
@@ -65,19 +124,6 @@ pub fn run() {
     while !session::stopping() {
         let t0 = Instant::now();
         tick += 1;
-
-        // the player may point the monitor at another server while the session runs
-        if let Some(t) = session::target().filter(|t| *t != cur_target) {
-            ip = probe::resolve_v4(&t);
-            pinger = ip.and_then(|ip| probe::Pinger::new(ip, 1000));
-            cur_target = t;
-        }
-        let sample = match (&mut pinger, ip) {
-            (Some(p), _) => p.ping(),
-            (None, Some(ip)) => probe::tcp_sample(ip, 1000),
-            _ => None,
-        };
-        session::with_health(|h| h.window.push(sample));
 
         if tick % 5 == 0 && !session::stopping() {
             // ---- engine
@@ -171,9 +217,7 @@ pub fn run() {
             });
         }
 
-        while t0.elapsed() < Duration::from_secs(1) && !session::stopping() {
-            std::thread::sleep(Duration::from_millis(100));
-        }
+        finish_tick(t0);
     }
 }
 

@@ -33,6 +33,26 @@ const ACCT: &str = "/proc/sys/net/netfilter/nf_conntrack_acct";
 const STATE: &str = "/run/netfreedom.state";
 const LOG_DIR: &str = "/run/netfreedom";
 
+/// Nice value of the engine: the same idea as `HIGH_PRIORITY_CLASS` for `winws` on Windows. The
+/// engine sits on the packet path of the game, so it must not queue behind a compile or a download.
+pub const ENGINE_NICE: i32 = -10;
+
+/// Starts the child with a raised priority. Done between fork and exec (not with `setpriority` on
+/// the pid afterwards) so that every thread of the engine inherits it: on Linux the nice value is
+/// per thread. Needs root, which `start` has anyway; where it fails the engine still runs, just
+/// with the normal priority.
+pub fn raise_priority(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: the closure runs in the forked child before exec and only makes one
+    // async-signal-safe syscall; its result is deliberately ignored.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setpriority(libc::PRIO_PROCESS, 0, ENGINE_NICE);
+            Ok(())
+        });
+    }
+}
+
 /// Engine output. It lives in a root-owned 0700 directory under /run: the former
 /// `/tmp/netfreedom-nfqws.log` could be pre-created by any local user as a symlink, and the
 /// root-run `File::create` would then overwrite whatever file it pointed to.
@@ -127,16 +147,16 @@ pub fn start(layout: &Layout, args: &[String], include_lo: bool) -> Result<(), S
 
     let log = open_log()?;
     let log2 = log.try_clone().map_err(|e| e.to_string())?;
-    let child = Command::new(&exe)
-        .arg(format!("--qnum={QNUM}"))
+    let mut cmd = Command::new(&exe);
+    cmd.arg(format!("--qnum={QNUM}"))
         .arg(format!("--dpi-desync-fwmark={FWMARK}"))
         .args(&nf_args)
         .current_dir(&layout.bin)
         .stdin(Stdio::null())
         .stdout(log)
-        .stderr(log2)
-        .spawn()
-        .map_err(|e| format!("cannot start {}: {e}", exe.display()))?;
+        .stderr(log2);
+    raise_priority(&mut cmd);
+    let child = cmd.spawn().map_err(|e| format!("cannot start {}: {e}", exe.display()))?;
     *CHILD.lock().map_err(|_| "poisoned lock")? = Some(child);
 
     let t0 = Instant::now();
@@ -222,5 +242,26 @@ mod log_tests {
         assert_eq!(fs::read_to_string(&victim).unwrap(), "precious");
         let _ = fs::remove_file(log_path());
         let _ = fs::remove_file(&victim);
+    }
+    #[test]
+    fn engine_child_starts_with_a_raised_priority_when_allowed() {
+        // field 19 of /proc/self/stat is the nice value of the process that reads it
+        let run = |raise: bool| {
+            let mut cmd = Command::new("/bin/sh");
+            cmd.args(["-c", "cut -d' ' -f19 /proc/self/stat"]).stdin(Stdio::null());
+            if raise {
+                raise_priority(&mut cmd);
+            }
+            String::from_utf8_lossy(&cmd.output().expect("spawn").stdout).trim().to_owned()
+        };
+        let root = unsafe { libc::geteuid() } == 0;
+        let plain = run(false);
+        let raised = run(true);
+        if root {
+            assert_eq!(raised, ENGINE_NICE.to_string(), "plain run was {plain}");
+        } else {
+            // not root: the raise is refused and must not stop the child from running
+            assert_eq!(raised, plain);
+        }
     }
 }

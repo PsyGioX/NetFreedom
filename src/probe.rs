@@ -274,6 +274,68 @@ pub fn tcp_sample(ip: Ipv4Addr, timeout_ms: u32) -> Option<f64> {
     Some(t0.elapsed().as_secs_f64() * 1000.0)
 }
 
+/// Consecutive silent ICMP probes after which the live monitor checks whether TCP 443 answers
+/// instead (and then re-checks after every further run of this many).
+pub const ICMP_GIVE_UP: u32 = 5;
+
+/// Method state of the live monitor. Many game servers drop ICMP. Before, the monitor opened an
+/// ICMP socket (which always works), got silence and drew "100% loss" for a perfectly healthy
+/// server; only `tune` knew how to fall back to TCP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MethodSwitch {
+    via: Via,
+    icmp_misses: u32,
+}
+
+impl MethodSwitch {
+    pub const fn new() -> Self {
+        Self { via: Via::Icmp, icmp_misses: 0 }
+    }
+
+    pub const fn via(&self) -> Via {
+        self.via
+    }
+
+    /// Records one ICMP probe. `true` = ICMP has been silent for a whole run, check TCP now.
+    pub fn icmp_result(&mut self, answered: bool) -> bool {
+        if answered {
+            self.icmp_misses = 0;
+            return false;
+        }
+        self.icmp_misses += 1;
+        self.icmp_misses % ICMP_GIVE_UP == 0
+    }
+}
+
+impl Default for MethodSwitch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// One live sample. Returns the round-trip time (`None` = lost) and whether the method just
+/// switched from ICMP to TCP (the caller drops the window: ICMP "losses" were not losses).
+/// The probes are closures so that the decision is testable without a network.
+pub fn live_sample(m: &mut MethodSwitch, icmp: impl FnOnce() -> Option<f64>, tcp: impl FnOnce() -> Option<f64>) -> (Option<f64>, bool) {
+    match m.via {
+        Via::Tcp443 => (tcp(), false),
+        Via::Icmp => {
+            let s = icmp();
+            if !m.icmp_result(s.is_some()) {
+                return (s, false);
+            }
+            match tcp() {
+                Some(t) => {
+                    m.via = Via::Tcp443;
+                    (Some(t), true)
+                }
+                // both silent: the host (or the tunnel) really is down, keep ICMP and keep trying
+                None => (None, false),
+            }
+        }
+    }
+}
+
 /// Which probe a whole comparison uses. `tune` fixes one for ALL scenarios: ICMP and TCP-connect
 /// numbers are not comparable, and a scenario that silently fell back to the other one used to be
 /// ranked against the rest as if they were the same thing.
@@ -367,6 +429,52 @@ pub fn run(target: &str, o: &Options) {
 #[cfg(test)]
 mod method_tests {
     use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn monitor_falls_back_to_tcp_when_icmp_is_filtered() {
+        let mut m = MethodSwitch::new();
+        let icmp_calls = Cell::new(0);
+        let run = |m: &mut MethodSwitch| {
+            live_sample(
+                m,
+                || {
+                    icmp_calls.set(icmp_calls.get() + 1);
+                    None
+                },
+                || Some(31.0),
+            )
+        };
+        for _ in 0..4 {
+            assert_eq!(run(&mut m), (None, false), "not yet: one dropped ping is not a verdict");
+        }
+        assert_eq!(run(&mut m), (Some(31.0), true), "5th silent ICMP probe, TCP answers: switch");
+        assert_eq!(m.via(), Via::Tcp443);
+        let before = icmp_calls.get();
+        assert_eq!(run(&mut m), (Some(31.0), false));
+        assert_eq!(icmp_calls.get(), before, "ICMP is not tried any more once TCP is the method");
+    }
+
+    #[test]
+    fn a_real_outage_does_not_switch_the_method() {
+        let mut m = MethodSwitch::new();
+        for _ in 0..12 {
+            let (s, switched) = live_sample(&mut m, || None, || None);
+            assert_eq!((s, switched), (None, false));
+        }
+        assert_eq!(m.via(), Via::Icmp, "if TCP is silent too, the loss is real and is shown as loss");
+    }
+
+    #[test]
+    fn occasional_icmp_loss_resets_the_counter() {
+        let mut m = MethodSwitch::new();
+        for i in 0..40 {
+            let ans = i % 4 != 0; // every 4th probe dropped: ordinary loss, never 5 in a row
+            let (s, switched) = live_sample(&mut m, || ans.then_some(20.0), || panic!("TCP must not be touched"));
+            assert_eq!((s.is_some(), switched), (ans, false));
+        }
+        assert_eq!(m.via(), Via::Icmp);
+    }
 
     #[test]
     fn icmp_tcp_disagreement() {

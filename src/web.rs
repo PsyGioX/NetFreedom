@@ -123,7 +123,7 @@ pub fn score(results: &[WebResult]) -> f64 {
     results.iter().map(|r| if r.ok { r.secs } else { 100.0 }).sum()
 }
 
-fn null_device() -> &'static str {
+pub fn null_device() -> &'static str {
     if cfg!(windows) { "NUL" } else { "/dev/null" }
 }
 

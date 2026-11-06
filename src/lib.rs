@@ -28,6 +28,7 @@ pub mod dash;
 pub mod engine;
 pub mod health;
 pub mod monitor;
+pub mod netdiag;
 pub mod session;
 pub mod nftrules;
 pub mod paths;

@@ -29,6 +29,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::health::Trace;
+use crate::probe::Via;
 use crate::paths::Layout;
 use crate::run::Plan;
 use crate::stats::Window;
@@ -59,6 +60,8 @@ pub struct Health {
     pub warp_connected: Option<bool>,
     pub engine_alive: bool,
     pub window: Window,
+    /// How the latency is measured right now (ICMP, or TCP 443 when the host ignores ICMP).
+    pub via: Option<Via>,
     pub web: Vec<WebResult>,
     pub web_at: Option<Instant>,
     pub events: VecDeque<(Instant, String)>,
@@ -76,6 +79,7 @@ impl Health {
             warp_connected: None,
             engine_alive: true,
             window: Window::new(60),
+            via: None,
             web: Vec::new(),
             web_at: None,
             events: VecDeque::new(),

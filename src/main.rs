@@ -22,6 +22,7 @@ use nf::crash;
 use nf::dash;
 use nf::health;
 use nf::maint;
+use nf::netdiag;
 use nf::paths::Layout;
 use nf::probe;
 use nf::profiles;
@@ -44,8 +45,10 @@ USAGE
   netfreedom tune [--bypass]          measure EVERY strategy on your connection and pick the best
   netfreedom stop                     emergency stop (WARP and the packet engine)
   netfreedom check [host] [count]     ping / jitter / packet loss (default 1.1.1.1, 50 probes)
+      --load                          also test latency UNDER LOAD (bufferbloat): the line is saturated for ~30 s
   netfreedom list                     list strategies
-  netfreedom doctor                   diagnose the system (drivers, services, lists, conflicts)
+  netfreedom doctor [--net [host]]    diagnose the system (drivers, services, lists, conflicts);
+                                      --net adds Wi-Fi/cable, background traffic and latency under load
   netfreedom ipset [none|any|loaded]  switch the address filter (no argument: show it)
   netfreedom lists update             download fresh host and address lists
   netfreedom fakes [list|set ..]      show / change the fake packets (discord, game)
@@ -78,6 +81,7 @@ TUNE OPTIONS
       --top <1-10>       how many leaders get a longer confirmation run (default 3; --no-confirm skips it)
       --plain-score      rank by median latency only (default ranking punishes jitter and spikes, as games feel them)
       --no-baseline      skip the no-bypass test       --no-save   do not remember the winner
+      --no-direct        WARP goal: skip the final comparison with the direct path (it needs a real --target)
 ";
 
 const ABOUT: &str = "\
@@ -197,7 +201,18 @@ fn dispatch(args: &[String]) -> (i32, bool) {
                     (0, true)
                 }
                 "uninstall" => finish(uninstall::run(&layout), true),
-                "doctor" => finish(maint::doctor(&layout), true),
+                "doctor" => {
+                    let r = maint::doctor(&layout);
+                    if rest.iter().any(|a| a == "--net") {
+                        // the host to ping under load: an argument, else the saved game server, else 1.1.1.1
+                        let host = rest.iter().find(|a| !a.starts_with("--")).cloned().unwrap_or_else(|| {
+                            let t = Config::load_with_legacy(&layout.cfg, &layout.cfg_legacy).target;
+                            if t.is_empty() { "1.1.1.1".to_owned() } else { t }
+                        });
+                        netdiag::run_report(&host);
+                    }
+                    finish(r, true)
+                }
                 "ipset" => finish(maint::ipset(&layout, rest.first().map(String::as_str)), true),
                 "lists" => match rest.first().map(String::as_str) {
                     Some("update") => finish(maint::lists_update(&layout), true),
@@ -263,6 +278,9 @@ fn tune_cmd(layout: &Layout, rest: &[String]) -> (i32, bool) {
 
 fn check(rest: &[String]) {
     sys::set_title("Ping and packet loss check");
+    // `--load` adds the latency-under-load (bufferbloat) test after the usual report
+    let load = rest.iter().any(|a| a == "--load");
+    let rest: Vec<String> = rest.iter().filter(|a| *a != "--load").cloned().collect();
     let (target, count) = match rest.first() {
         Some(t) => (t.clone(), rest.get(1).and_then(|c| c.parse().ok()).unwrap_or(50)),
         None => {
@@ -280,6 +298,13 @@ fn check(rest: &[String]) {
     let expect_tunnel = nf::warp::Warp::locate().is_some_and(|w| w.is_connected());
     println!("{}", ui::tr("Измеряю…", "Measuring..."));
     health::print_report(&health::full_check(&target, count.clamp(8, 1000), expect_tunnel));
+    if load {
+        println!("{}", ui::tr("\nДальше канал нагружается около 30 секунд: не играйте и не качайте в это время.", "\nNext the line is loaded for about 30 seconds: do not play or download meanwhile."));
+        match netdiag::run_load_test(&target, &netdiag::LoadUrls::cloudflare(), std::time::Duration::from_secs(8)) {
+            Ok(r) => netdiag::print_load_report(&r),
+            Err(e) => ui::warn(&e),
+        }
+    }
 }
 
 #[cfg(windows)]

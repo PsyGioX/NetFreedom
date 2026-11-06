@@ -70,6 +70,7 @@ pub fn lines() -> Vec<String> {
             h.window.summary(),
             h.window.loss_pct(),
             h.window.len(),
+            h.via,
             h.web.clone(),
             h.web_at,
             h.events.iter().rev().take(3).map(|(t, m)| (t.elapsed().as_secs(), m.clone())).collect::<Vec<_>>(),
@@ -77,7 +78,7 @@ pub fn lines() -> Vec<String> {
             h.reconnects,
         )
     });
-    let (trace, trace_err, warp_up, engine_alive, win, loss, n, web, web_at, events, restarts, reconnects) = h;
+    let (trace, trace_err, warp_up, engine_alive, win, loss, n, via, web, web_at, events, restarts, reconnects) = h;
     let secs = a.started.elapsed().as_secs();
     let mut v = vec![format!(
         "{} {}  {} · {} · {}",
@@ -115,7 +116,11 @@ pub fn lines() -> Vec<String> {
         Some(s) => {
             let c = latency_color(s.median);
             v.push(kv(tr("Задержка", "Latency"), &format!("{} {}", paint(c, &format!("{:>6} ms", fmt_ms(s.median))), ui::latency_bar(s.median, 20.0, 150.0))));
-            let lc = if loss > 2.0 { RED } else if loss > 0.0 || s.jitter > 8.0 { YELLOW } else { GREEN };
+            let lc = match crate::stats::level(s) {
+                crate::stats::Level::Bad => RED,
+                crate::stats::Level::Fair => YELLOW,
+                crate::stats::Level::Good => GREEN,
+            };
             v.push(kv(
                 tr("Качество", "Quality"),
                 &format!("{} {} {} ms · {} {}% · {} {} {}", dot(lc), tr("джиттер", "jitter"), fmt_ms(s.jitter), tr("потери", "loss"), loss, tr("окно", "window"), n, tr("с", "s")),
@@ -124,7 +129,11 @@ pub fn lines() -> Vec<String> {
         None if n > 0 => v.push(kv(tr("Задержка", "Latency"), &format!("{} {}", dot(RED), paint(RED, tr("нет ответов от сервера", "no replies from the host"))))),
         None => v.push(kv(tr("Задержка", "Latency"), &format!("{} {}", dot(DIM), tr("измеряется…", "measuring...")))),
     }
-    v.push(kv(tr("Сервер", "Host"), &a.target));
+    let host = match via {
+        Some(m) => format!("{} · {}", clip(&a.target, 40), m.label()),
+        None => clip(&a.target, 48),
+    };
+    v.push(kv(tr("Сервер", "Host"), &host));
 
     let eng = if engine_alive { format!("{} {}", dot(GREEN), tr("работает", "running")) } else { format!("{} {}", dot(RED), tr("остановлен", "stopped")) };
     let mut row = format!("{eng}  ({} {restarts})", tr("перезапусков", "restarts"));

@@ -65,9 +65,15 @@ pub struct TuneArgs {
     pub top: usize,
     /// Rank with the plain formula instead of the games one.
     pub plain_score: bool,
+    /// Skip the final "direct path vs the best tunnel" comparison (WARP goal only).
+    pub no_direct: bool,
     /// Measuring method fixed for the whole run (set by `run` after a warm-up connection).
     pub via: Option<probe::Via>,
 }
+
+/// What `tune` measures when no `--target` is given. It answers with or without WARP, so it says
+/// nothing about the path to a game server.
+const DEFAULT_TARGET: &str = "1.1.1.1";
 
 impl Default for TuneArgs {
     fn default() -> Self {
@@ -76,7 +82,7 @@ impl Default for TuneArgs {
             quick: false,
             full: false,
             only: Vec::new(),
-            target: "1.1.1.1".into(),
+            target: DEFAULT_TARGET.into(),
             count: 15,
             timeout_s: 12,
             no_save: false,
@@ -84,6 +90,7 @@ impl Default for TuneArgs {
             no_baseline: false,
             top: 3,
             plain_score: false,
+            no_direct: false,
             via: None,
         }
     }
@@ -100,6 +107,7 @@ impl TuneArgs {
                 "--quick" => a.quick = true,
                 "--full" => a.full = true,
                 "--plain-score" => a.plain_score = true,
+                "--no-direct" => a.no_direct = true,
                 "--only" => a.only = value("--only")?.split(';').map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect(),
                 "--target" => a.target = value("--target")?,
                 "--count" => a.count = value("--count")?.parse().ok().filter(|n| (5..=200).contains(n)).ok_or("--count must be 5..200")?,
@@ -326,6 +334,93 @@ pub fn rank(results: &mut [Result1]) {
     results.sort_by(|a, b| a.score.total_cmp(&b.score));
 }
 
+/// Direct path vs the best tunnel, judged with the same games score.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathVerdict {
+    TunnelBetter,
+    Similar,
+    DirectBetter,
+}
+
+/// Differences under 10% (and under 5 points of score) are noise, not an answer.
+pub fn compare_paths(direct: &Summary, tunnel: &Summary) -> PathVerdict {
+    let d = stats::score_games(direct, 0.0, 0.0);
+    let t = stats::score_games(tunnel, 0.0, 0.0);
+    let margin = (d.max(t) * 0.10).max(5.0);
+    if (d - t).abs() <= margin {
+        PathVerdict::Similar
+    } else if t < d {
+        PathVerdict::TunnelBetter
+    } else {
+        PathVerdict::DirectBetter
+    }
+}
+
+fn path_line(label: &str, s: &Summary, via: Via) -> String {
+    format!("{label}: median {} ms, jitter {}, p95 {}, loss {}% via {}", fmt_ms(s.median), fmt_ms(s.jitter), fmt_ms(s.p95), s.loss_pct, via.label())
+}
+
+/// The question `tune` could not answer before: does WARP help on the route to YOUR game server at
+/// all, or is the plain connection just as good (or better)? Runs once, after the ranking, with
+/// WARP switched off, and does not take part in the ranking.
+fn direct_vs_tunnel(warp: Option<&Warp>, a: &TuneArgs, tunnel: Option<&Summary>) -> Vec<String> {
+    use crate::ui::tr;
+    if a.target == DEFAULT_TARGET {
+        return vec![tr(
+            "Сравнение с прямым путём пропущено: 1.1.1.1 отвечает и с WARP, и без него. Укажите --target <IP игрового сервера>.",
+            "Direct-path comparison skipped: 1.1.1.1 answers with and without WARP. Pass --target <your game server's IP>.",
+        )
+        .to_owned()];
+    }
+    let Some(t) = tunnel.filter(|t| stats::reliable(t)) else {
+        return vec![tr("Сравнение с прямым путём пропущено: нет надёжного замера через туннель.", "Direct-path comparison skipped: no reliable tunnel measurement.").to_owned()];
+    };
+    if let Some(w) = warp {
+        w.disconnect();
+        w.wait_disconnected(Duration::from_secs(6));
+    }
+    settle(1500);
+    let opts = Options { count: a.count, interval_ms: 120, timeout_ms: 1000, warmup: true, tunnel_stats: false };
+    let (direct, via) = match probe::measure_with(&a.target, &opts, a.via) {
+        Ok(x) => x,
+        Err(e) => return vec![format!("{}: {e}", tr("Прямой путь не измерен", "Direct path not measured"))],
+    };
+    if !stats::reliable(&direct) {
+        return vec![format!("{} ({}/{})", tr("Прямой путь: слишком мало ответов для вывода", "Direct path: too few replies to conclude"), direct.received, direct.sent)];
+    }
+    let mut v = vec![path_line(tr("Напрямую (без WARP)   ", "Direct (no WARP)      "), &direct, via), path_line(tr("Через WARP (лучший)  ", "Through WARP (best)   "), t, via)];
+    v.push(
+        match compare_paths(&direct, t) {
+            PathVerdict::TunnelBetter => tr("Вывод: на этом маршруте WARP заметно лучше прямого пути.", "Verdict: on this route WARP is clearly better than the direct path."),
+            PathVerdict::Similar => tr("Вывод: разница небольшая, WARP не даёт заметного выигрыша по задержке.", "Verdict: the difference is small, WARP brings no clear latency gain."),
+            PathVerdict::DirectBetter => tr("Вывод: напрямую лучше, WARP добавляет задержку или джиттер.", "Verdict: the direct path is better, WARP adds latency or jitter."),
+        }
+        .to_owned(),
+    );
+    v.push(
+        tr(
+            "Это замер задержки, а не доступности: если без WARP игра блокируется, выбирать надо по доступности.",
+            "This measures latency, not reachability: if the game is blocked without WARP, choose by reachability.",
+        )
+        .to_owned(),
+    );
+    v
+}
+
+/// Adds lines to the saved report (the report is rewritten after every scenario, so this runs last).
+fn append_report(layout: &Layout, lines: &[String]) {
+    if lines.is_empty() {
+        return;
+    }
+    use std::io::Write;
+    if let Ok(mut f) = fs::OpenOptions::new().append(true).open(layout.utils.join("tune_report.txt")) {
+        let _ = writeln!(f, "\nDirect path vs the best tunnel:");
+        for l in lines {
+            let _ = writeln!(f, "  {l}");
+        }
+    }
+}
+
 fn report_text(results: &[Result1], a: &TuneArgs, started: u64, finished: bool) -> String {
     let goal = if a.bypass { "bypass (real downloads)".to_string() } else { format!("games through WARP, target {}, {} probes", a.target, a.count) };
     let mut t = format!("netfreedom tune report, {}\ngoal: {goal} | timeout {} s{}\n\n", fmt_utc(started), a.timeout_s, if finished { "" } else { "\nINCOMPLETE: stopped before all scenarios were measured" });
@@ -521,7 +616,14 @@ pub fn run(layout: &Layout, mut a: TuneArgs) -> Result<(), String> {
     } else {
         run::cleanup_all();
     }
+    let direct_lines = if !a.bypass && !a.no_direct && !stopped && !sys::interrupted() {
+        println!("{}", ui::tr("\nСравниваю с прямым путём (без WARP)…", "\nComparing with the direct path (no WARP)..."));
+        direct_vs_tunnel(warp.as_ref(), &a, results.first().filter(|r| r.score.is_finite()).and_then(|r| r.summary.as_ref()))
+    } else {
+        Vec::new()
+    };
     save_report(layout, &results, &a, started, !stopped);
+    append_report(layout, &direct_lines);
 
     println!("\n==================== Results (best first) ====================");
     if a.bypass {
@@ -541,6 +643,13 @@ pub fn run(layout: &Layout, mut a: TuneArgs) -> Result<(), String> {
     let failed = results.iter().filter(|r| !r.score.is_finite()).count();
     if failed > 0 {
         println!("    ... {failed} scenario(s) did not work on this connection (see utils/tune_report.txt)");
+    }
+
+    if !direct_lines.is_empty() {
+        println!();
+        for l in &direct_lines {
+            println!("  {l}");
+        }
     }
 
     let report_path = layout.utils.join("tune_report.txt");
@@ -653,11 +762,36 @@ mod tests {
         assert!(report_text(&r, &a, 0, true).contains("Best: x"));
     }
 
+    fn sm(med: f64, jit: f64, loss: f64) -> Summary {
+        let sent = 20;
+        let received = (sent as f64 * (1.0 - loss / 100.0)).round() as u32;
+        Summary { sent, received, loss_pct: loss, min: med, median: med, avg: med, p95: med, max: med, stdev: 0.0, jitter: jit }
+    }
+
+    #[test]
+    fn direct_vs_tunnel_verdicts() {
+        assert_eq!(compare_paths(&sm(80.0, 2.0, 0.0), &sm(40.0, 2.0, 0.0)), PathVerdict::TunnelBetter);
+        assert_eq!(compare_paths(&sm(40.0, 2.0, 0.0), &sm(80.0, 2.0, 0.0)), PathVerdict::DirectBetter);
+        assert_eq!(compare_paths(&sm(40.0, 2.0, 0.0), &sm(42.0, 2.0, 0.0)), PathVerdict::Similar, "2 ms is noise");
+        assert_eq!(compare_paths(&sm(10.0, 1.0, 0.0), &sm(13.0, 1.0, 0.0)), PathVerdict::Similar, "small absolute gaps are noise");
+        // a steady direct path beats a faster but lossy tunnel: the games score decides, not the median
+        assert_eq!(compare_paths(&sm(45.0, 2.0, 0.0), &sm(30.0, 2.0, 5.0)), PathVerdict::DirectBetter);
+    }
+
+    #[test]
+    fn the_default_target_skips_the_direct_comparison() {
+        let a = TuneArgs::default();
+        let lines = direct_vs_tunnel(None, &a, Some(&sm(20.0, 1.0, 0.0)));
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("--target"), "{lines:?}");
+    }
+
     #[test]
     fn argument_parsing() {
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
         let a = TuneArgs::parse(&s(&["--quick", "--target", "8.8.8.8", "--count", "10", "--only", "ALT; fake", "--no-save"])).unwrap();
-        assert!(a.quick && a.no_save);
+        assert!(a.quick && a.no_save && !a.no_direct);
+        assert!(TuneArgs::parse(&s(&["--no-direct"])).unwrap().no_direct);
         assert_eq!((a.target.as_str(), a.count), ("8.8.8.8", 10));
         assert_eq!(a.only, ["alt", "fake"]);
         assert!(TuneArgs::parse(&s(&["--bypass"])).unwrap().bypass);

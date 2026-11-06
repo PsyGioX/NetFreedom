@@ -164,13 +164,15 @@ pub fn grade(expect_tunnel: bool, trace: Option<&Result<Trace, String>>, main: O
     if !stats::reliable(s) || disagree {
         return Grade::Unverified;
     }
-    if download_ok == Some(false) || s.loss_pct > 2.0 || s.jitter > 15.0 {
+    if download_ok == Some(false) {
         return Grade::Bad;
     }
-    if s.loss_pct > 0.0 || s.jitter > 6.0 || stats::long_tail(s) {
-        return Grade::Fair;
+    // the same scale as the `check` verdict and the live panel (see `stats::level`)
+    match stats::level(s) {
+        stats::Level::Bad => Grade::Bad,
+        stats::Level::Fair => Grade::Fair,
+        stats::Level::Good => Grade::Good,
     }
-    Grade::Good
 }
 
 /// The post-connection test. Order matters: first prove the tunnel carries traffic, then measure.
@@ -310,7 +312,9 @@ mod tests {
         assert_eq!(grade(false, None, Some(&good), false, Some(true)), Grade::Good, "plain bypass expects no tunnel");
         assert_eq!(grade(true, Some(&on), Some(&s(24.0, 1.0, 0.0, 3)), false, None), Grade::Unverified, "3 probes are not a test");
         assert_eq!(grade(true, Some(&on), Some(&good), true, None), Grade::Unverified, "ICMP and TCP disagree");
-        assert_eq!(grade(true, Some(&on), Some(&s(24.0, 9.0, 0.0, 25)), false, None), Grade::Fair);
+        assert_eq!(grade(true, Some(&on), Some(&s(24.0, 9.0, 0.0, 25)), false, None), Grade::Good, "jitter up to 10 ms is 'good' in the check verdict too");
+        assert_eq!(grade(true, Some(&on), Some(&s(24.0, 12.0, 0.0, 25)), false, None), Grade::Fair);
+        assert_eq!(grade(true, Some(&on), Some(&s(24.0, 16.0, 0.0, 25)), false, None), Grade::Bad);
         assert_eq!(grade(true, Some(&on), Some(&s(24.0, 2.0, 8.0, 25)), false, None), Grade::Bad);
         assert_eq!(grade(true, Some(&on), Some(&good), false, Some(false)), Grade::Bad, "a stalled download is bad whatever the ping says");
         assert_eq!(grade(true, Some(&on), None, false, None), Grade::Bad);

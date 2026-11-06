@@ -32,6 +32,41 @@ pub struct Summary {
     pub jitter: f64,
 }
 
+/// ONE set of thresholds for every place that judges a link: the `check` verdict, the quality
+/// grade after `start` and the live panel. They used to differ (5/10 in the verdict, 6/15 in the
+/// grade, 8 in the panel), so the same measurement got three different opinions.
+pub const JITTER_EXCELLENT_MS: f64 = 5.0;
+/// Up to this jitter a link is fine for most games; above it, it is merely tolerable.
+pub const JITTER_GOOD_MS: f64 = 10.0;
+/// Above this jitter (or this loss) a link is bad for games.
+pub const JITTER_BAD_MS: f64 = 15.0;
+pub const LOSS_BAD_PCT: f64 = 2.0;
+/// p95 - median above this is a periodic-spike pattern worth a hint.
+pub const TAIL_LONG_MS: f64 = 15.0;
+
+/// Three-step quality scale (green / yellow / red).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Level {
+    Good,
+    Fair,
+    Bad,
+}
+
+/// Pure rule behind `level`, so that it can be tested on plain numbers.
+pub fn level_of(jitter_ms: f64, loss_pct: f64, long_tail: bool) -> Level {
+    if loss_pct > LOSS_BAD_PCT || jitter_ms > JITTER_BAD_MS {
+        Level::Bad
+    } else if loss_pct > 0.0 || jitter_ms > JITTER_GOOD_MS || long_tail {
+        Level::Fair
+    } else {
+        Level::Good
+    }
+}
+
+pub fn level(s: &Summary) -> Level {
+    level_of(s.jitter, s.loss_pct, long_tail(s))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     Excellent,
@@ -80,9 +115,9 @@ pub fn verdict(s: &Summary) -> Verdict {
     let lost = s.sent - s.received;
     if lost > 0 {
         Verdict::Loss
-    } else if s.jitter <= 5.0 {
+    } else if s.jitter <= JITTER_EXCELLENT_MS {
         Verdict::Excellent
-    } else if s.jitter <= 10.0 {
+    } else if s.jitter <= JITTER_GOOD_MS {
         Verdict::Good
     } else {
         Verdict::HighJitter
@@ -144,7 +179,7 @@ impl Window {
 
 /// True when the tail is long enough to deserve a hint about periodic spikes.
 pub fn long_tail(s: &Summary) -> bool {
-    s.received > 1 && s.p95 - s.median > 15.0
+    s.received > 1 && s.p95 - s.median > TAIL_LONG_MS
 }
 
 #[cfg(test)]
@@ -196,6 +231,22 @@ mod tests {
         let steady = summarize(&[40.0, 41.0, 40.0, 41.0, 40.0], 5).unwrap();
         let fast_spiky = summarize(&[25.0, 25.0, 90.0, 25.0, 25.0], 5).unwrap();
         assert!(score_games(&steady, 1.0, 0.0) < score_games(&fast_spiky, 1.0, 0.0), "the games score is not");
+    }
+
+    #[test]
+    fn one_scale_for_every_screen() {
+        assert_eq!(level_of(3.0, 0.0, false), Level::Good);
+        assert_eq!(level_of(10.0, 0.0, false), Level::Good, "the boundary of the published 'good' verdict");
+        assert_eq!(level_of(10.1, 0.0, false), Level::Fair);
+        assert_eq!(level_of(15.0, 0.0, false), Level::Fair);
+        assert_eq!(level_of(15.1, 0.0, false), Level::Bad);
+        assert_eq!(level_of(1.0, 0.5, false), Level::Fair, "any loss is at least a warning");
+        assert_eq!(level_of(1.0, 2.0, false), Level::Fair);
+        assert_eq!(level_of(1.0, 2.1, false), Level::Bad);
+        assert_eq!(level_of(1.0, 0.0, true), Level::Fair, "a long tail is a warning, not a failure");
+        // the verdict text and the level agree on what 'good' means
+        let s = summarize(&[10.0, 20.0, 10.0, 20.0, 10.0], 5).unwrap();
+        assert_eq!((verdict(&s), level(&s)), (Verdict::Good, Level::Good));
     }
 
     #[test]
