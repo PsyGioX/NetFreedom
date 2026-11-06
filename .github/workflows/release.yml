@@ -23,7 +23,7 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # rc.exe (resource compiler) must be on PATH, otherwise the icon is not embedded
       - uses: ilammy/msvc-dev-cmd@v1
@@ -70,7 +70,7 @@ jobs:
       # action here to sign package/netfreedom.exe BEFORE the checksums are computed.
 
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v3
         with:
           subject-path: |
             package/netfreedom.exe
