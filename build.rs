@@ -40,7 +40,7 @@ fn main() {
     let text = format!(
         "1 ICON \"{icon_path}\"\n\
          1 VERSIONINFO\nFILEVERSION {comma}\nPRODUCTVERSION {comma}\nBEGIN\n BLOCK \"StringFileInfo\"\n BEGIN\n  BLOCK \"040904B0\"\n  BEGIN\n\
-         \x20  VALUE \"ProductName\", \"NetFreedom\"\n   VALUE \"LegalCopyright\", \"Copyright (C) 2026 Sergey (PsyGioX). GNU GPL v3.0\"\n   VALUE \"Comments\", \"https://github.com/PsyGioX/NetFreedom\"\n   VALUE \"FileDescription\", \"NetFreedom - open, local, reversible access to the open Internet\"\n\
+         \x20  VALUE \"CompanyName\", \"PsyGioX\"\n   VALUE \"ProductName\", \"NetFreedom\"\n   VALUE \"LegalCopyright\", \"Copyright (C) 2026 Sergey (PsyGioX). GNU GPL v3.0\"\n   VALUE \"Comments\", \"https://github.com/PsyGioX/NetFreedom\"\n   VALUE \"FileDescription\", \"NetFreedom - open, local, reversible access to the open Internet\"\n\
          \x20  VALUE \"FileVersion\", \"{ver}\"\n   VALUE \"ProductVersion\", \"{ver}\"\n   VALUE \"OriginalFilename\", \"netfreedom.exe\"\n  END\n END\n\
          \x20BLOCK \"VarFileInfo\"\n BEGIN\n  VALUE \"Translation\", 0x0409, 0x04B0\n END\nEND\n"
     );

@@ -34,6 +34,23 @@ jobs:
       - name: Build
         run: cargo build --release --locked
 
+      # Authenticode signing: this is what makes the UAC prompt show "Verified publisher: PsyGioX".
+      # Needs a code-signing certificate whose subject (CN) is PsyGioX, stored as repo secrets:
+      #   CODESIGN_PFX_BASE64 (the .pfx, base64) and CODESIGN_PFX_PASSWORD.
+      # Without the secrets this step is skipped and Windows shows "Unknown publisher".
+      - name: Sign netfreedom.exe
+        shell: pwsh
+        env:
+          PFX_B64: ${{ secrets.CODESIGN_PFX_BASE64 }}
+          PFX_PASS: ${{ secrets.CODESIGN_PFX_PASSWORD }}
+        run: |
+          if (-not $env:PFX_B64) { Write-Host "No signing certificate configured, skipping."; exit 0 }
+          [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\codesign.pfx", [Convert]::FromBase64String($env:PFX_B64))
+          signtool sign /fd SHA256 /f "$env:RUNNER_TEMP\codesign.pfx" /p $env:PFX_PASS /tr http://timestamp.digicert.com /td SHA256 /d "NetFreedom" target/release/netfreedom.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          signtool verify /pa target/release/netfreedom.exe
+          Remove-Item "$env:RUNNER_TEMP\codesign.pfx"
+
       - name: Assemble the package
         shell: pwsh
         run: |
