@@ -89,7 +89,7 @@ mod tests {
 
     #[test]
     fn table_is_complete() {
-        assert_eq!(PROFILES.len(), 4 + 28);
+        assert_eq!(PROFILES.len(), 4 + 29);
         assert!(find(DEFAULT_PROFILE).unwrap().is_dedicated_lean());
         assert!(find(DEFAULT_BYPASS).unwrap().is_bypass());
         assert!(find("BALANCED").is_some());
@@ -172,6 +172,38 @@ mod tests {
             let with_social = segments(a).iter().filter(|s| s.contains(&"--hostlist={LISTS}list-social.txt")).count();
             assert!(with_social >= 3, "{}: list-social.txt must be in the QUIC, TLS and HTTP list segments, found {with_social}", p.name);
         }
+    }
+
+    #[test]
+    fn developer_hosting_is_covered_by_every_bypass_strategy() {
+        for p in PROFILES.iter().filter(|p| p.is_bypass()) {
+            let n = segments(p.classic.unwrap()).iter().filter(|s| s.contains(&"--hostlist={LISTS}list-dev.txt")).count();
+            assert!(n >= 3, "{}: list-dev.txt must be in the QUIC, TLS and HTTP list segments, found {n}", p.name);
+        }
+    }
+
+    #[test]
+    fn youtube_quic_and_googlevideo_are_covered() {
+        for p in PROFILES.iter().filter(|p| p.is_bypass()) {
+            let segs = segments(p.classic.unwrap());
+            assert!(
+                segs.iter().any(|s| s.contains(&"--filter-udp=443") && s.contains(&"--hostlist={LISTS}list-google.txt")),
+                "{}: no QUIC rule for YouTube",
+                p.name
+            );
+            // the first matching rule wins, so the specific googlevideo rule must precede the generic Google one
+            let generic = segs.iter().position(|s| s.contains(&"--filter-tcp=443") && s.contains(&"--hostlist={LISTS}list-google.txt")).unwrap();
+            if let Some(gv) = segs.iter().position(|s| s.contains(&"--hostlist-domains=googlevideo.com")) {
+                assert!(gv < generic, "{}: the googlevideo rule must come before the generic Google rule", p.name);
+            }
+        }
+        // the proven originals stay verbatim and the fake-free techniques stay free of fakes
+        for name in ["general", "alt2", "alt11", "alt13", "split", "sni-split", "hostfake-g"] {
+            let segs = segments(find(name).unwrap().classic.unwrap());
+            assert!(!segs.iter().any(|s| s.contains(&"--hostlist-domains=googlevideo.com")), "{name}");
+        }
+        let balanced = segments(find("balanced").unwrap().classic.unwrap());
+        assert!(balanced.iter().any(|s| s.contains(&"--hostlist-domains=googlevideo.com")));
     }
 
     #[test]

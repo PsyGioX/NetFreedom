@@ -2,3 +2,10 @@ target/
 utils/warp_launcher.cfg
 utils/game_filter.enabled
 *.log
+
+# generated at build time (see BUILD.md and .github/workflows/release.yml), never committed
+dist/*/netfreedom
+dist/*/netfreedom.exe
+dist/*/SHA256SUMS.txt
+dist/*/README.md
+package/

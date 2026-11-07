@@ -38,10 +38,15 @@ pub const TARGETS: &[Target] = &[
     Target { name: "Cloudflare 300 KB", url: "https://speed.cloudflare.com/__down?bytes=300000", min_bytes: 300_000, any_status: false },
     Target { name: "Discord", url: "https://discord.com/api/v9/gateway", min_bytes: 1, any_status: false },
     Target { name: "YouTube", url: "https://www.youtube.com/generate_204", min_bytes: 0, any_status: false },
+    // the video servers are a different host (and often a different rule) than the page
+    Target { name: "YouTube video", url: "https://redirector.googlevideo.com/generate_204", min_bytes: 0, any_status: true },
     Target { name: "Instagram", url: "https://www.instagram.com/", min_bytes: 0, any_status: true },
     Target { name: "X (Twitter)", url: "https://x.com/", min_bytes: 0, any_status: true },
     Target { name: "Telegram", url: "https://web.telegram.org/", min_bytes: 0, any_status: true },
     Target { name: "WhatsApp", url: "https://web.whatsapp.com/", min_bytes: 0, any_status: true },
+    // developer hosting: Roskomnadzor started to block *.vercel.app / *.netlify.app in 2026
+    Target { name: "Vercel", url: "https://vercel.com/", min_bytes: 0, any_status: true },
+    Target { name: "Netlify", url: "https://www.netlify.com/", min_bytes: 0, any_status: true },
 ];
 
 #[derive(Clone, Debug, PartialEq)]
@@ -87,6 +92,7 @@ pub fn explain_exit(code: i32, stderr: &str) -> String {
         35 | 60 if revocation => "certificate revocation check failed (not a block: the test itself was disturbed)",
         6 => "DNS did not resolve the name (DNS blocked or poisoned)",
         7 => "connection refused or dropped while connecting",
+        28 if stderr.contains("Connection timed out after") => "connect timed out: the server's IP does not answer at all (IP-level block or poisoned DNS; an SNI/TLS strategy cannot fix that)",
         28 => "timed out: packets are being dropped (typical for blocking or throttling)",
         35 => "TLS handshake failed (the connection was cut during the handshake)",
         52 => "server closed the connection without an answer",
@@ -149,7 +155,7 @@ fn fetch_once(t: &Target, timeout: Duration) -> WebResult {
     // certificate was revoked. Those are separate plain-HTTP requests that blocking and the
     // strategies themselves break, so a working bypass looked like a failure ("YouTube FAIL" while
     // the browser, which does not do this, opened it). We test reachability, not PKI.
-    cmd.args(["-sS", "--ssl-no-revoke", "-L", "--max-redirs", "3", "-A", USER_AGENT, "-o", null_device(), "--connect-timeout", "6", "-m"])
+    cmd.args(["-sS", "--ssl-no-revoke", "-L", "--max-redirs", "3", "-A", USER_AGENT, "-o", null_device(), "--connect-timeout", "5", "-m"])
         .arg(timeout.as_secs().to_string())
         .args(["-w", "%{http_code} %{size_download} %{time_total}", t.url]);
     match cmd.output() {
@@ -183,12 +189,36 @@ pub fn curl_available() -> bool {
     curl_command().arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
 }
 
-/// Runs every target at the same time (the slowest one decides how long this takes).
-pub fn probe(timeout: Duration) -> Vec<WebResult> {
+/// The failure happened BEFORE any TLS: the server's address does not answer the very first packet
+/// (or DNS gave nothing). No desync strategy can change that, it is an IP-level block or a
+/// poisoned DNS answer. `tune --bypass` uses this to stop waiting for such sites.
+pub fn connect_blocked(r: &WebResult) -> bool {
+    !r.ok && r.bytes == 0 && (r.note.contains("connect timed out") || r.note.contains("DNS did not resolve") || r.note.starts_with("skipped"))
+}
+
+/// Result for a site that is not tested again because it cannot be fixed by a strategy.
+fn skipped(t: &Target) -> WebResult {
+    WebResult::failed(t.name, "skipped: IP-level block or poisoned DNS (no strategy can fix it)".into())
+}
+
+/// Runs every target at the same time (the slowest one decides how long this takes). Targets named
+/// in `skip` are not requested; they are reported as failed without costing any time.
+pub fn probe_skip(timeout: Duration, skip: &[String]) -> Vec<WebResult> {
     std::thread::scope(|s| {
-        let handles: Vec<_> = TARGETS.iter().map(|t| s.spawn(move || fetch(t, timeout))).collect();
+        let handles: Vec<_> = TARGETS
+            .iter()
+            .map(|t| {
+                let skip_it = skip.iter().any(|n| n == t.name);
+                s.spawn(move || if skip_it { skipped(t) } else { fetch(t, timeout) })
+            })
+            .collect();
         handles.into_iter().zip(TARGETS).map(|(h, t)| h.join().unwrap_or_else(|_| WebResult::failed(t.name, "probe crashed".into()))).collect()
     })
+}
+
+/// Runs every target at the same time (the slowest one decides how long this takes).
+pub fn probe(timeout: Duration) -> Vec<WebResult> {
+    probe_skip(timeout, &[])
 }
 
 #[cfg(test)]
@@ -223,6 +253,28 @@ mod tests {
             assert!(judge(t, true, 403, 1500, 0.4, "").ok, "{name}: a 403 from an anti-bot wall still means TLS got through");
             assert!(!judge(t, false, 0, 0, 0.0, "timed out").ok);
         }
+    }
+
+    #[test]
+    fn unanswered_syn_is_told_apart_from_a_later_drop() {
+        let t = &TARGETS[1];
+        let syn = explain_exit(28, "curl: (28) Connection timed out after 5004 milliseconds");
+        let later = explain_exit(28, "curl: (28) Operation timed out after 10000 milliseconds with 0 bytes received");
+        let r = judge(t, false, 0, 0, 0.0, &syn);
+        assert!(connect_blocked(&r), "{}", r.note);
+        assert!(!connect_blocked(&judge(t, false, 0, 0, 0.0, &later)), "a drop after the handshake CAN be an SNI block");
+        assert!(connect_blocked(&judge(t, false, 0, 0, 0.0, &explain_exit(6, ""))));
+        assert!(!connect_blocked(&judge(t, true, 200, 10, 0.1, "")));
+    }
+
+    #[test]
+    fn skipped_sites_cost_no_time_and_count_as_failed() {
+        let names: Vec<String> = TARGETS.iter().map(|t| t.name.to_owned()).collect();
+        let t0 = std::time::Instant::now();
+        let r = probe_skip(Duration::from_secs(1), &names);
+        assert!(t0.elapsed() < Duration::from_millis(500));
+        assert_eq!(r.len(), TARGETS.len());
+        assert!(r.iter().all(|x| !x.ok && x.note.starts_with("skipped")));
     }
 
     #[test]

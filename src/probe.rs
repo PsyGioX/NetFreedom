@@ -206,10 +206,58 @@ mod os {
 /// first round-trips made every run after a (re)start look worse than the steady state.
 const WARMUP: u32 = 3;
 
-/// Quiet measurement: round-trip times (ms) of the replies that arrived, in order.
-/// `Err` only if the ICMP socket cannot be opened.
-pub fn measure_icmp(ip: Ipv4Addr, o: &Options) -> Result<Vec<f64>, String> {
+/// Longest a single measuring phase may take, whatever `count` says. A silent or very lossy host
+/// used to cost `count` x (timeout + interval): 25 probes were 30 s of a frozen screen, and the
+/// quality check ran several such phases one after another.
+const MAX_PHASE_SECS: u64 = 15;
+
+/// Consecutive silent probes, with nothing answered yet, after which the host counts as silent and
+/// the phase stops instead of waiting out every remaining probe.
+const GIVE_UP_SILENT: u32 = 6;
+
+/// Wall-clock budget of one phase: at least `MAX_PHASE_SECS`, more for an explicit long run
+/// (`check <host> 1000` must still be able to send 1000 probes).
+fn phase_budget(o: &Options) -> Duration {
+    Duration::from_secs(MAX_PHASE_SECS).max(Duration::from_millis(u64::from(o.count) * (o.interval_ms + 60)))
+}
+
+/// What one phase measured: the round-trip times (ms) of the replies, in order, and how many probes
+/// were REALLY sent. A phase can stop early, so loss must be computed against `sent`, not against
+/// the requested count (that would report a perfectly healthy link as lossy).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Phase {
+    pub times: Vec<f64>,
+    pub sent: u32,
+}
+
+impl Phase {
+    fn new(cap: u32) -> Self {
+        Self { times: Vec::with_capacity(cap as usize), sent: 0 }
+    }
+
+    pub fn summary(&self) -> Option<Summary> {
+        stats::summarize(&self.times, self.sent)
+    }
+
+    /// Records one probe; `true` = stop now (the host is silent, or the time budget is used up).
+    fn record(&mut self, reply: Option<f64>, silent: &mut u32, started: Instant, budget: Duration) -> bool {
+        self.sent += 1;
+        match reply {
+            Some(t) => {
+                self.times.push(t);
+                *silent = 0;
+            }
+            None => *silent += 1,
+        }
+        (self.times.is_empty() && *silent >= GIVE_UP_SILENT) || started.elapsed() >= budget
+    }
+}
+
+/// ICMP phase. `Err` only if the ICMP socket cannot be opened.
+pub fn icmp_phase(ip: Ipv4Addr, o: &Options) -> Result<Phase, String> {
     let mut p = os::Pinger::new(ip, o.timeout_ms).ok_or("cannot open an ICMP socket (on Linux run as root or allow ping_group_range)")?;
+    let t0 = Instant::now();
+    let budget = phase_budget(o);
     if o.warmup {
         // The first packet through a fresh tunnel pays route/cache setup and would inflate max/jitter.
         for _ in 0..WARMUP {
@@ -217,38 +265,56 @@ pub fn measure_icmp(ip: Ipv4Addr, o: &Options) -> Result<Vec<f64>, String> {
             std::thread::sleep(Duration::from_millis(o.interval_ms.min(250)));
         }
     }
-    let mut times = Vec::with_capacity(o.count as usize);
+    let mut ph = Phase::new(o.count);
+    let mut silent = 0;
     for i in 1..=o.count {
-        if let Some(t) = p.ping() {
-            times.push(t);
+        let reply = p.ping();
+        if ph.record(reply, &mut silent, t0, budget) {
+            break;
         }
         if i < o.count {
             std::thread::sleep(Duration::from_millis(o.interval_ms));
         }
     }
-    Ok(times)
+    Ok(ph)
+}
+
+/// TCP-connect phase to `ip:port`; used when ICMP is filtered.
+pub fn tcp_phase(ip: Ipv4Addr, port: u16, o: &Options) -> Phase {
+    let addr = SocketAddr::new(IpAddr::V4(ip), port);
+    let t0 = Instant::now();
+    let budget = phase_budget(o);
+    let timeout = Duration::from_millis(u64::from(o.timeout_ms));
+    if o.warmup {
+        for _ in 0..WARMUP {
+            let _ = TcpStream::connect_timeout(&addr, timeout);
+            std::thread::sleep(Duration::from_millis(o.interval_ms.min(250)));
+        }
+    }
+    let mut ph = Phase::new(o.count);
+    let mut silent = 0;
+    for i in 1..=o.count {
+        let c0 = Instant::now();
+        let reply = TcpStream::connect_timeout(&addr, timeout).ok().map(|_| c0.elapsed().as_secs_f64() * 1000.0);
+        if ph.record(reply, &mut silent, t0, budget) {
+            break;
+        }
+        if i < o.count {
+            std::thread::sleep(Duration::from_millis(o.interval_ms));
+        }
+    }
+    ph
+}
+
+/// Quiet measurement: round-trip times (ms) of the replies that arrived, in order.
+/// `Err` only if the ICMP socket cannot be opened. (Use `icmp_phase` when loss matters.)
+pub fn measure_icmp(ip: Ipv4Addr, o: &Options) -> Result<Vec<f64>, String> {
+    icmp_phase(ip, o).map(|p| p.times)
 }
 
 /// TCP connect round-trips to `ip:port`; used when ICMP is filtered.
 pub fn measure_tcp(ip: Ipv4Addr, port: u16, o: &Options) -> Vec<f64> {
-    let addr = SocketAddr::new(IpAddr::V4(ip), port);
-    let mut times = Vec::with_capacity(o.count as usize);
-    if o.warmup {
-        for _ in 0..WARMUP {
-            let _ = TcpStream::connect_timeout(&addr, Duration::from_millis(o.timeout_ms as u64));
-            std::thread::sleep(Duration::from_millis(o.interval_ms.min(250)));
-        }
-    }
-    for i in 1..=o.count {
-        let t0 = Instant::now();
-        if TcpStream::connect_timeout(&addr, Duration::from_millis(o.timeout_ms as u64)).is_ok() {
-            times.push(t0.elapsed().as_secs_f64() * 1000.0);
-        }
-        if i < o.count {
-            std::thread::sleep(Duration::from_millis(o.interval_ms));
-        }
-    }
-    times
+    tcp_phase(ip, port, o).times
 }
 
 /// Where the numbers came from.
@@ -353,16 +419,14 @@ pub fn detect_method(target: &str) -> Option<Via> {
 pub fn measure_with(target: &str, o: &Options, via: Option<Via>) -> Result<(Summary, Via), String> {
     let ip = resolve_v4(target).ok_or_else(|| format!("cannot resolve an IPv4 address for \"{target}\""))?;
     if via != Some(Via::Tcp443) {
-        let icmp = measure_icmp(ip, o).unwrap_or_default();
-        if let Some(s) = stats::summarize(&icmp, o.count) {
+        if let Some(s) = icmp_phase(ip, o).ok().and_then(|p| p.summary()) {
             return Ok((s, Via::Icmp));
         }
         if via == Some(Via::Icmp) {
             return Err(format!("no ICMP replies from {target}"));
         }
     }
-    let tcp = measure_tcp(ip, 443, o);
-    stats::summarize(&tcp, o.count).map(|s| (s, Via::Tcp443)).ok_or_else(|| format!("no replies from {target} (ICMP and TCP 443)"))
+    tcp_phase(ip, 443, o).summary().map(|s| (s, Via::Tcp443)).ok_or_else(|| format!("no replies from {target} (ICMP and TCP 443)"))
 }
 
 pub fn measure(target: &str, o: &Options) -> Result<(Summary, Via), String> {
@@ -385,14 +449,14 @@ pub fn run(target: &str, o: &Options) {
     };
     let extra = if o.warmup { " + warm-up" } else { "" };
     ui::cyan(&format!("Probing {target} ({ip}, {} packets{extra})...", o.count));
-    let times = match measure_icmp(ip, o) {
-        Ok(t) => t,
+    let phase = match icmp_phase(ip, o) {
+        Ok(p) => p,
         Err(e) => {
             ui::error(&e);
             return;
         }
     };
-    let Some(s) = stats::summarize(&times, o.count) else {
+    let Some(s) = phase.summary() else {
         ui::color("31", &format!("Result: no replies from {target}. 100% loss (the host may block ICMP, or the tunnel is down)."));
         return;
     };

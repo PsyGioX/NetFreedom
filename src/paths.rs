@@ -93,6 +93,8 @@ impl Layout {
             // the engine refuse to run).
             ("list-social.txt", include_str!("../assets/list-social.txt")),
             ("ipset-social.txt", include_str!("../assets/ipset-social.txt")),
+            // developer hosting blocked in 2026 (Vercel, Netlify): ours as well
+            ("list-dev.txt", include_str!("../assets/list-dev.txt")),
         ] {
             let p = lists.join(name);
             if !p.exists() {
@@ -119,7 +121,14 @@ mod tests {
         for d in ["instagram.com", "cdninstagram.com", "x.com", "twimg.com", "t.co", "telegram.org", "t.me", "whatsapp.com", "whatsapp.net"] {
             assert!(social.lines().any(|x| x.trim() == d), "{d} missing");
         }
-        assert!(fs::read_to_string(root.join("lists").join("ipset-social.txt")).unwrap().contains("149.154.160.0/20"));
+        let ipset = fs::read_to_string(root.join("lists").join("ipset-social.txt")).unwrap();
+        for r in ["149.154.160.0/20", "91.105.192.0/23", "2001:b28:f23c::/48"] {
+            assert!(ipset.lines().any(|x| x.trim() == r), "{r} missing");
+        }
+        let dev = fs::read_to_string(root.join("lists").join("list-dev.txt")).unwrap();
+        for d in ["vercel.app", "netlify.app"] {
+            assert!(dev.lines().any(|x| x.trim() == d), "{d} missing");
+        }
         assert_eq!(fs::read_to_string(root.join("lists").join("list-general-user.txt")).unwrap(), "my.example\n", "user files are never overwritten");
         // a second run must not touch an edited social list either
         fs::write(root.join("lists").join("list-social.txt"), "mine.example\n").unwrap();

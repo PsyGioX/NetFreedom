@@ -1,0 +1,7 @@
+vercel.app
+vercel.com
+vercel-dns.com
+vercel.sh
+vusercontent.net
+netlify.app
+netlify.com

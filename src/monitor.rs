@@ -44,6 +44,25 @@ use crate::web;
 
 const MAX_ENGINE_RESTARTS: u32 = 5;
 
+/// Hosts the monitor falls back to when the DEFAULT target stays silent. Some Russian providers
+/// drop or throttle ICMP and TCP to 1.1.1.1 (the panel then showed "no replies" for a working
+/// connection). A target the player chose himself is never replaced.
+pub const DEFAULT_TARGETS: [&str; 4] = ["1.1.1.1", "8.8.8.8", "9.9.9.9", "77.88.8.8"];
+
+/// Consecutive lost samples (about 12-24 s) after which a default target is swapped.
+const SILENT_SWITCH: u32 = 12;
+
+/// The next fallback after `cur`, if `cur` is one of the default targets and not the last one.
+pub fn next_default_target(cur: &str) -> Option<&'static str> {
+    let i = DEFAULT_TARGETS.iter().position(|t| *t == cur)?;
+    DEFAULT_TARGETS.get(i + 1).copied()
+}
+
+/// Bypass: first real download test this many seconds after the start, then every `WEB_EVERY`.
+/// (It was 60 s and 300 s, so the panel said "not checked" for a minute and then went stale.)
+const WEB_FIRST_TICK: u64 = 8;
+const WEB_EVERY: u64 = 120;
+
 fn engine_alive() -> bool {
     backend::engine_running() || backend::native_active()
 }
@@ -84,6 +103,7 @@ fn sampler(a: &Active) {
     let mut cur_target = a.target.clone();
     let (mut ip, mut pinger) = setup(&cur_target);
     let mut method = MethodSwitch::new();
+    let mut silent: u32 = 0;
 
     while !session::stopping() {
         let t0 = Instant::now();
@@ -107,6 +127,16 @@ fn sampler(a: &Active) {
             session::event(tr("Узел не отвечает на ICMP, меряю по TCP 443", "The host ignores ICMP, measuring via TCP 443").to_owned());
         }
         session::with_health(|h| h.window.push(sample));
+
+        // a silent DEFAULT target: try the next public host instead of drawing "no replies" forever
+        silent = if sample.is_some() { 0 } else { silent + 1 };
+        if silent >= SILENT_SWITCH {
+            if let Some(next) = next_default_target(&cur_target) {
+                session::event(format!("{} {cur_target}: {} {next}", tr("Нет ответа от", "No answer from"), tr("пробую", "trying")));
+                session::set_target(next);
+            }
+            silent = 0;
+        }
 
         finish_tick(t0);
     }
@@ -209,8 +239,8 @@ fn watchdog(a: &Active) {
         }
 
         // ---- bypass: do the sites really open?
-        if a.mode == Mode::Bypass && tick % 300 == 60 && !session::stopping() && web::curl_available() {
-            let r = web::probe(Duration::from_secs(10));
+        if a.mode == Mode::Bypass && tick % WEB_EVERY == WEB_FIRST_TICK && !session::stopping() && web::curl_available() {
+            let r = web::probe(Duration::from_secs(8));
             session::with_health(|h| {
                 h.web = r;
                 h.web_at = Some(Instant::now());
@@ -223,6 +253,13 @@ fn watchdog(a: &Active) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_silent_default_target_falls_back_but_a_chosen_one_never_does() {
+        assert_eq!(super::next_default_target("1.1.1.1"), Some("8.8.8.8"));
+        assert_eq!(super::next_default_target("77.88.8.8"), None, "the last fallback stays");
+        assert_eq!(super::next_default_target("203.0.113.7"), None, "the player's own server is never replaced");
+    }
+
     #[test]
     fn reconnect_backoff_grows_and_caps() {
         assert_eq!(super::backoff_secs(0), 15);

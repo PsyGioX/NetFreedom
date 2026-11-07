@@ -37,6 +37,8 @@ cargo build --release --locked
 
 ### 3. Сборка пакета
 
+В `dist/<платформа>` лежат только сторонние и исходные компоненты (`bin/`, `lists/`, `utils/`, лицензии). Бинарник `netfreedom`, `README.md` и `SHA256SUMS.txt` в репозитории не хранятся: они создаются при сборке (так не бывает устаревшего exe рядом со свежими списками).
+
 ```bash
 rm -rf package && cp -r dist/linux package
 cp target/release/netfreedom package/netfreedom
@@ -142,7 +144,7 @@ Compress-Archive -Path package/* -DestinationPath "NetFreedom-<версия>-win
 
 В workflow есть заготовка под подпись кода (SignPath): подписывать `package/netfreedom.exe` нужно
 **до** подсчёта контрольных сумм, иначе `verify` не пройдёт. Релиз в CI запускается пушем тега
-`v*` (например, `git tag v3.2.0 && git push origin v3.2.0`); тогда же формируется аттестация сборки
+`v*` (например, `git tag v3.3.0 && git push origin v3.3.0`); тогда же формируется аттестация сборки
 (`actions/attest-build-provenance`).
 
 ---

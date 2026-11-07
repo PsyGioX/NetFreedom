@@ -391,12 +391,14 @@ fn live_monitor() {
 
 fn quality_now() {
     let Some(a) = session::active() else { return };
-    println!("{}", ui::tr("Измеряю (≈10 с)…", "Measuring (~10 s)..."));
+    println!("{}", ui::tr("Измеряю (обычно 10–15 с, максимум около 30 с)…", "Measuring (usually 10-15 s, at most about 30 s)..."));
     match a.mode {
         session::Mode::Warp => health::print_report(&health::full_check(&a.target, 25, true)),
         session::Mode::Bypass => {
-            let r = nf::web::probe(std::time::Duration::from_secs(12));
+            let t0 = std::time::Instant::now();
+            let r = nf::web::probe(std::time::Duration::from_secs(8));
             run::print_web(&r);
+            println!("{} {:.0} {}", ui::tr("Заняло", "Took"), t0.elapsed().as_secs_f64(), ui::tr("с", "s"));
             session::with_health(|h| {
                 h.web = r;
                 h.web_at = Some(std::time::Instant::now());

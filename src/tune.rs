@@ -69,6 +69,9 @@ pub struct TuneArgs {
     pub no_direct: bool,
     /// Measuring method fixed for the whole run (set by `run` after a warm-up connection).
     pub via: Option<probe::Via>,
+    /// Bypass goal: sites whose address never answers (IP block / poisoned DNS) in every scenario
+    /// measured so far. No strategy can open them, so they are not waited for any more.
+    pub skip_sites: Vec<String>,
 }
 
 /// What `tune` measures when no `--target` is given. It answers with or without WARP, so it says
@@ -92,6 +95,7 @@ impl Default for TuneArgs {
             plain_score: false,
             no_direct: false,
             via: None,
+            skip_sites: Vec::new(),
         }
     }
 }
@@ -166,7 +170,7 @@ impl Scenario {
 
 /// `--quick` for the bypass goal: the strategies that are most often the answer (about a third of
 /// the full run).
-const QUICK_BYPASS: [&str; 10] = ["balanced", "disorder", "max", "disorder-sni", "split", "hostfake", "alt", "alt2", "alt11", "simple-fake"];
+const QUICK_BYPASS: [&str; 10] = ["balanced", "disorder", "max", "hostfake-g", "hostfake", "alt9", "alt11", "alt12", "alt13", "split"];
 
 /// Builds the list of scenarios for the given options (pure, unit-tested). Every strategy is unique
 /// (the table is deduplicated), so nothing is measured twice.
@@ -214,6 +218,24 @@ fn settle(ms: u64) {
     std::thread::sleep(Duration::from_millis(ms));
 }
 
+/// Sites that failed BEFORE any TLS (the address does not answer, or DNS gave nothing) in every
+/// measured scenario, the baseline included. A packet strategy changes how a ClientHello is sent;
+/// it cannot make an unanswered SYN answered, so waiting for these sites again only costs time.
+/// Needs at least three measured scenarios, so one unlucky run decides nothing.
+fn unfixable_sites(results: &[Result1]) -> Vec<String> {
+    let measured: Vec<&Result1> = results.iter().filter(|r| !r.web.is_empty()).collect();
+    if measured.len() < 3 {
+        return Vec::new();
+    }
+    measured[0]
+        .web
+        .iter()
+        .filter(|w| web::connect_blocked(w))
+        .map(|w| w.name.clone())
+        .filter(|name| measured.iter().all(|r| r.web.iter().any(|w| w.name == *name && web::connect_blocked(w))))
+        .collect()
+}
+
 fn teardown(warp: Option<&Warp>) {
     if let Some(w) = warp {
         w.disconnect();
@@ -248,7 +270,7 @@ fn evaluate(layout: &Layout, warp: Option<&Warp>, sc: &Scenario, a: &TuneArgs, c
             teardown(None);
             return r;
         }
-        r.web = web::probe(Duration::from_secs(a.timeout_s.min(10)));
+        r.web = web::probe_skip(Duration::from_secs(a.timeout_s.min(10)), &a.skip_sites);
         r.connected = r.web.iter().any(|w| w.ok);
         r.score = web::score(&r.web);
         if sc.profile.is_some() && !backend::engine_running() {
@@ -464,7 +486,7 @@ pub fn run(layout: &Layout, mut a: TuneArgs) -> Result<(), String> {
         return Err("no scenario matches --only".into());
     }
 
-    let per = if a.bypass { 14 } else { a.count as u64 * 120 / 1000 + 6 };
+    let per = if a.bypass { 10 } else { a.count as u64 * 120 / 1000 + 6 };
     let est = list.len() as u64 * per;
     println!("Tuning: {} scenarios, about {} min (a failed one costs up to {} s).", list.len(), est.div_ceil(60), a.timeout_s);
     if a.bypass {
@@ -571,6 +593,17 @@ pub fn run(layout: &Layout, mut a: TuneArgs) -> Result<(), String> {
             stopped = true;
             break;
         }
+        if a.bypass {
+            let skip = unfixable_sites(&results);
+            if !skip.is_empty() && skip != a.skip_sites {
+                ui::say(&format!(
+                    "        {} {}",
+                    ui::tr("не жду сайты, которые не отвечают на сам SYN (блокировка по IP/DNS, стратегией не лечится):", "no longer waiting for sites that never answer the SYN (IP/DNS block, no strategy fixes that):"),
+                    skip.join(", ")
+                ));
+            }
+            a.skip_sites = skip;
+        }
         let r = evaluate_safe(layout, warp.as_ref(), sc, &a, a.count);
         ui::say(&format!("[{:>2}/{}] {:<26} {}", i + 1, total, sc.label, describe(&r)));
         results.push(r);
@@ -633,6 +666,10 @@ pub fn run(layout: &Layout, mut a: TuneArgs) -> Result<(), String> {
             println!("Every strategy opened LESS than no bypass at all. That points at the engine, not at the sites:");
             println!("check utils/winws.log, antivirus/firewall, and try `netfreedom start --bypass --show-winws -v`.");
         }
+    }
+    if a.bypass && !a.skip_sites.is_empty() {
+        println!("Not fixable by any strategy on this connection (the server's IP does not answer, or DNS is poisoned): {}.", a.skip_sites.join(", "));
+        println!("These need DNS-over-HTTPS or another resolver, WARP, or a proxy: not a different strategy.");
     }
     if stopped {
         println!("(stopped early: only {} of {} scenarios were measured)", results.len(), total);
@@ -707,15 +744,15 @@ mod tests {
     #[test]
     fn scenario_lists_have_no_duplicates() {
         let all = scenarios(&TuneArgs::default());
-        // baseline + 4 WARP strategies + 28 bypass strategies (low latency)
-        assert_eq!(all.len(), 1 + 4 + 28);
+        // baseline + 4 WARP strategies + 29 bypass strategies (low latency)
+        assert_eq!(all.len(), 1 + 4 + 29);
         assert!(all[0].profile.is_none());
         let labels: std::collections::HashSet<_> = all.iter().map(|s| s.label.clone()).collect();
         assert_eq!(labels.len(), all.len());
         assert_eq!(scenarios(&TuneArgs { quick: true, ..Default::default() }).len(), 1 + 4);
-        assert_eq!(scenarios(&TuneArgs { full: true, ..Default::default() }).len(), 1 + 4 + 56);
+        assert_eq!(scenarios(&TuneArgs { full: true, ..Default::default() }).len(), 1 + 4 + 58);
         let b = scenarios(&TuneArgs { bypass: true, ..Default::default() });
-        assert_eq!(b.len(), 1 + 28, "bypass goal: baseline + the 28 bypass strategies, no WARP strategies");
+        assert_eq!(b.len(), 1 + 29, "bypass goal: baseline + the 29 bypass strategies, no WARP strategies");
         assert!(b.iter().skip(1).all(|s| s.bypass_goal && s.profile.unwrap().is_bypass()));
         let q = scenarios(&TuneArgs { bypass: true, quick: true, ..Default::default() });
         assert_eq!(q.len(), 1 + QUICK_BYPASS.len(), "every quick name must exist in the table");

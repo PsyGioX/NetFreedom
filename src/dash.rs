@@ -101,7 +101,7 @@ pub fn lines() -> Vec<String> {
         }
         Mode::Bypass => {
             let s = if web.is_empty() {
-                format!("{} {}", dot(DIM), tr("проверка при запуске не выполнялась", "not checked yet"))
+                format!("{} {}", dot(DIM), tr("первая проверка через несколько секунд…", "first check in a few seconds..."))
             } else {
                 let ok = web.iter().filter(|w| w.ok).count();
                 let c = if ok == web.len() { GREEN } else if ok * 2 >= web.len() { YELLOW } else { RED };
@@ -109,6 +109,14 @@ pub fn lines() -> Vec<String> {
                 format!("{} {ok}/{} {} · {when} {}", dot(c), web.len(), tr("открываются", "open"), tr("назад", "ago"))
             };
             v.push(kv(tr("Сайты", "Sites"), &s));
+            // name the sites that do not open: "4/9 open" alone does not say what to fix
+            let failing: Vec<&str> = web.iter().filter(|w| !w.ok).map(|w| w.name.as_str()).collect();
+            if !failing.is_empty() {
+                v.push(kv(tr("Не открыты", "Closed"), &clip(&failing.join(", "), 52)));
+                if web.iter().any(crate::web::connect_blocked) {
+                    v.push(kv("", &paint(DIM, &clip(tr("часть: блокировка по IP/DNS, стратегией не лечится", "some: IP/DNS block, a strategy cannot fix it"), 52))));
+                }
+            }
         }
     }
 

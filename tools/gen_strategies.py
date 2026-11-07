@@ -58,8 +58,12 @@ WFRAW = (
     "udp.DstPort==4500 or udp.DstPort==8095 or udp.DstPort==8443)"
 )
 
-# list-social.txt (Instagram/Meta, X/Twitter) is ours: `lists update` never overwrites it
-HOSTS_GENERAL = ["--hostlist={LISTS}list-general.txt", "--hostlist={LISTS}list-general-user.txt", "--hostlist={LISTS}list-social.txt"]
+# list-social.txt (Instagram/Meta, X/Twitter, Telegram, WhatsApp) and list-dev.txt (Vercel, Netlify:
+# blocked by Roskomnadzor in 2026) are ours: `lists update` never overwrites them
+HOSTS_GENERAL = [
+    "--hostlist={LISTS}list-general.txt", "--hostlist={LISTS}list-general-user.txt",
+    "--hostlist={LISTS}list-social.txt", "--hostlist={LISTS}list-dev.txt",
+]
 EXCLUDES = [
     "--hostlist-exclude={LISTS}list-exclude.txt",
     "--hostlist-exclude={LISTS}list-exclude-user.txt",
@@ -110,6 +114,12 @@ TECH = {
         "--dpi-desync=fake,multisplit", "--dpi-desync-split-seqovl=681", "--dpi-desync-split-pos=1",
         "--dpi-desync-fooling=badseq", "--dpi-desync-badseq-increment=10000000",
         "--dpi-desync-repeats=8", f"--dpi-desync-split-seqovl-pattern={GOOGLE_TLS}", MOD("www.google.com"),
+    ],
+    # what Flowseal's own YouTube rule uses in 2026: no fake ClientHello, only a fake host name sent
+    # in front of the real one (ts fooling), the host is a google.com name
+    "hostfake-g": [
+        "--dpi-desync=hostfakesplit", "--dpi-desync-fooling=ts",
+        "--dpi-desync-hostfakesplit-mod=host=www.google.com",
     ],
     "max": [
         "--dpi-desync=fake,fakedsplit", "--dpi-desync-fakedsplit-pattern=0x00",
@@ -269,19 +279,38 @@ def quic(repeats):
 HTTP_RULE = ["--dpi-desync=fake,multisplit", "--dpi-desync-split-pos=method+2", "--dpi-desync-fooling=ts", "--dpi-desync-repeats=4"]
 
 
+# Our own techniques that send fake packets. Only these get the extra googlevideo rule below: the
+# proven original strategies are kept verbatim, and the split-only ones must stay free of fakes.
+GV_TECHS = {"fakesplit", "disorder", "max", "disorder-sni", "disorder-ya", "fdisorder", "ttl", "seqfake"}
+
+# YouTube video comes from googlevideo.com. On some providers (MGTS, Rostelecom in autumn 2026) the
+# page opens while TLS to googlevideo.com never completes with ANY of the general techniques; a
+# separate rule with hostfakesplit (a google.com host in front of the real one) fixes exactly that
+# (Flowseal/zapret-discord-youtube#17781).
+GOOGLEVIDEO_RULE = [
+    "--filter-tcp=443", "--hostlist-domains=googlevideo.com", "--ip-id=zero",
+    "--dpi-desync=hostfakesplit", "--dpi-desync-fooling=ts",
+    "--dpi-desync-hostfakesplit-mod=host=www.google.com",
+]
+
+
 def classic(tech, r_quic):
     """Port based capture: the strategy for sites, Discord, YouTube, Instagram, X and games."""
     t = TECH[tech]
     segs = [
         # QUIC (HTTP/3) to listed hosts
         ["--filter-udp=443", *HOSTS_GENERAL, *EXCLUDES, *quic(r_quic)],
+        # QUIC to YouTube: Chrome prefers it, and it was in no rule (list-google.txt is TCP only)
+        ["--filter-udp=443", "--hostlist={LISTS}list-google.txt", *quic(r_quic)],
         # Discord voice + STUN
         ["--filter-udp=19294-19344,50000-50100", "--filter-l7=discord,stun", "--dpi-desync=fake",
          "--dpi-desync-repeats=6", f"--dpi-desync-fake-discord={ACTIVE_DISCORD}",
          f"--dpi-desync-fake-stun={ACTIVE_DISCORD}"],
         # Discord media over TCP
         ["--filter-tcp=2053,2083,2087,2096,8443", "--hostlist-domains=discord.media", *t],
-        # YouTube / Google video
+        # YouTube video (googlevideo.com), see GOOGLEVIDEO_RULE
+        *([GOOGLEVIDEO_RULE] if tech in GV_TECHS else []),
+        # YouTube / Google
         ["--filter-tcp=443", "--hostlist={LISTS}list-google.txt", "--ip-id=zero", *t],
         # everything else on the lists (sites, Instagram, X, ...)
         ["--filter-tcp=443", *HOSTS_GENERAL, *EXCLUDES, *t],
@@ -349,6 +378,7 @@ BYPASS = [
     ("split", "overlapping split only, no fake packets (light, immune to fake bans)", "split", 6),
     ("sni-split", "split at the SNI extension", "sni-split", 6),
     ("hostfake", "fake ClientHello with a domestic host name (ya.ru)", "hostfake", 6),
+    ("hostfake-g", "hostfakesplit with a google.com host, ts (what Flowseal uses for YouTube in 2026)", "hostfake-g", 6),
     ("syndata", "payload inside SYN + out-of-order segments (IPv4)", "syndata", 6),
     ("ttl", "fakes that expire before the server (auto TTL)", "ttl", 6),
     ("seqfake", "fake with a future sequence number", "seqfake", 11),

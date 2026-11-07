@@ -153,6 +153,8 @@ pub struct Report {
     pub download: Option<web::WebResult>,
     pub notes: Vec<String>,
     pub grade: Grade,
+    /// How long the whole check really took (shown to the user; it used to be a guess in the prompt).
+    pub elapsed_s: f64,
 }
 
 /// Pure decision, separated from the measuring so that it can be tested.
@@ -176,22 +178,35 @@ pub fn grade(expect_tunnel: bool, trace: Option<&Result<Trace, String>>, main: O
 }
 
 /// The post-connection test. Order matters: first prove the tunnel carries traffic, then measure.
+///
+/// The three light probes (Cloudflare trace, ICMP, TCP connect) run AT THE SAME TIME: before, they
+/// were summed (8 s + 30 s + 14 s on a lossy link) and the check looked frozen. Each phase has its
+/// own time cap (see `probe::icmp_phase`). The 300 KB download runs only AFTER them: a download
+/// running alongside would fill the queues and inflate the very latency being measured.
 pub fn full_check(target: &str, count: u32, expect_tunnel: bool) -> Report {
+    let t_start = Instant::now();
     let mut notes = Vec::new();
-    let trace = expect_tunnel.then(|| fetch_trace(8));
+    let o = Options { count, interval_ms: 200, warmup: true, tunnel_stats: false, ..Options::default() };
+    let o2 = Options { count: (count / 2).max(6), warmup: false, ..Options::default() };
+    let ip = probe::resolve_v4(target);
+
+    let (trace, icmp, tcp) = std::thread::scope(|s| {
+        let h_trace = expect_tunnel.then(|| s.spawn(|| fetch_trace(8)));
+        let h_icmp = ip.map(|ip| s.spawn(move || probe::icmp_phase(ip, &o).ok().and_then(|p| p.summary())));
+        let h_tcp = ip.map(|ip| s.spawn(move || probe::tcp_phase(ip, 443, &o2).summary()));
+        (
+            h_trace.map(|h| h.join().unwrap_or_else(|_| Err("the tunnel check crashed".to_owned()))),
+            h_icmp.and_then(|h| h.join().ok()).flatten(),
+            h_tcp.and_then(|h| h.join().ok()).flatten(),
+        )
+    });
+
     if let Some(Ok(t)) = &trace {
         if !t.warp.through_tunnel() {
             notes.push("traffic bypasses the tunnel: the numbers below describe your normal connection, not WARP".to_owned());
         }
     }
-    let o = Options { count, interval_ms: 200, warmup: true, tunnel_stats: false, ..Options::default() };
-    let ip = probe::resolve_v4(target);
-    let (mut icmp, mut tcp) = (None, None);
-    if let Some(ip) = ip {
-        icmp = probe::measure_icmp(ip, &o).ok().and_then(|t| stats::summarize(&t, o.count));
-        let o2 = Options { count: (count / 2).max(6), ..Options { warmup: false, ..Options::default() } };
-        tcp = stats::summarize(&probe::measure_tcp(ip, 443, &o2), o2.count);
-    } else {
+    if ip.is_none() {
         notes.push(format!("cannot resolve {target}"));
     }
     let disagree = matches!((&icmp, &tcp), (Some(a), Some(b)) if probe::methods_disagree(a.median, b.median));
@@ -202,6 +217,11 @@ pub fn full_check(target: &str, count: u32, expect_tunnel: bool) -> Report {
     if icmp.is_none() && tcp.is_some() {
         notes.push("ICMP is filtered, using TCP-connect timing".to_owned());
     }
+    if icmp.is_none() && tcp.is_none() && ip.is_some() {
+        notes.push(format!(
+            "{target} answers neither ICMP nor TCP 443. Some providers drop or throttle ICMP to public resolvers such as 1.1.1.1: try `check` with another host (8.8.8.8, 77.88.8.8, your game server)."
+        ));
+    }
     if let Some(Err(e)) = &trace {
         notes.push(format!("{}: {e}", tr("туннель не подтверждён", "tunnel not confirmed")));
     }
@@ -210,9 +230,9 @@ pub fn full_check(target: &str, count: u32, expect_tunnel: bool) -> Report {
             notes.push(format!("{} ({}/{})", tr("слишком мало ответов для вывода", "too few replies to conclude"), s.received, s.sent));
         }
     }
-    let download = web::curl_available().then(|| web::fetch(&web::TARGETS[0], Duration::from_secs(12)));
+    let download = web::curl_available().then(|| web::fetch(&web::TARGETS[0], Duration::from_secs(10)));
     let grade = grade(expect_tunnel, trace.as_ref(), main, disagree, download.as_ref().map(|d| d.ok));
-    Report { target: target.to_owned(), trace, icmp, tcp, download, notes, grade }
+    Report { target: target.to_owned(), trace, icmp, tcp, download, notes, grade, elapsed_s: t_start.elapsed().as_secs_f64() }
 }
 
 fn lat_line(label: &str, s: &Summary) -> String {
@@ -260,6 +280,7 @@ pub fn print_report(r: &Report) {
         let (c, txt) = if d.ok { (GREEN, format!("{} {:.1} s", tr("300 КБ скачано за", "300 KB downloaded in"), d.secs)) } else { (RED, format!("{}: {}", tr("загрузка не удалась", "download failed"), ui::clip(&d.note, 38))) };
         lines.push(kv(tr("Загрузка", "Download"), &format!("{} {}", ui::dot(c), ui::clip(&txt, 52))));
     }
+    lines.push(kv(tr("Заняло", "Took"), &format!("{:.0} {}", r.elapsed_s, tr("с", "s"))));
     let (code, verdict) = match r.grade {
         Grade::Good => (GREEN, tr("Хорошо: потерь нет, джиттер низкий", "Good: no loss, low jitter")),
         Grade::Fair => (YELLOW, tr("Терпимо: есть джиттер или потери. Попробуйте `netfreedom tune`", "Fair: some jitter or loss. Try `netfreedom tune`")),
