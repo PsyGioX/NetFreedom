@@ -151,6 +151,11 @@ pub fn run(layout: &Layout) -> Result<(), String> {
         return Ok(());
     }
 
+    match crate::dns::restore(layout) {
+        Ok(true) => ui::ok("DNS restored to the settings from before NetFreedom"),
+        Ok(false) => {}
+        Err(e) => ui::warn(&format!("DNS: {e}")),
+    }
     println!("\n[1/4] Cloudflare WARP");
     match Warp::locate() {
         Some(w) => {

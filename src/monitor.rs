@@ -238,6 +238,14 @@ fn watchdog(a: &Active) {
             }
         }
 
+        // ---- encrypted DNS: is the resolver reachable? (switches provider only in bypass mode: with
+        // WARP up, names are resolved inside the tunnel, so a failing check says nothing about it)
+        if tick % 15 == 7 && !session::stopping() {
+            if let Some(ev) = crate::dns::health_step(&a.layout, a.mode == Mode::Bypass) {
+                session::event(ev);
+            }
+        }
+
         // ---- bypass: do the sites really open?
         if a.mode == Mode::Bypass && tick % WEB_EVERY == WEB_FIRST_TICK && !session::stopping() && web::curl_available() {
             let r = web::probe(Duration::from_secs(8));

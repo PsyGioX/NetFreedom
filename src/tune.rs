@@ -669,7 +669,7 @@ pub fn run(layout: &Layout, mut a: TuneArgs) -> Result<(), String> {
     }
     if a.bypass && !a.skip_sites.is_empty() {
         println!("Not fixable by any strategy on this connection (the server's IP does not answer, or DNS is poisoned): {}.", a.skip_sites.join(", "));
-        println!("These need DNS-over-HTTPS or another resolver, WARP, or a proxy: not a different strategy.");
+        println!("These need another resolver (`netfreedom dns set cloudflare` turns on DNS-over-HTTPS), WARP, or a proxy: not a different strategy.");
     }
     if stopped {
         println!("(stopped early: only {} of {} scenarios were measured)", results.len(), total);

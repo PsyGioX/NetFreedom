@@ -51,6 +51,8 @@ pub struct StartArgs {
     pub bypass: bool,
     /// No prompts: run until stopped (autostart, services).
     pub headless: bool,
+    /// Encrypted DNS for this session (`cloudflare` / `google` / `quad9` / `auto` / `off`); remembered.
+    pub dns: Option<String>,
 }
 
 impl StartArgs {
@@ -75,6 +77,11 @@ impl StartArgs {
                 "--native" => a.native = true,
                 "--bypass" => a.bypass = true,
                 "--headless" => a.headless = true,
+                "--dns" => {
+                    let v = value("--dns")?;
+                    crate::dns::Choice::parse(&v)?;
+                    a.dns = Some(v);
+                }
                 "--verbose" | "-v" => a.verbose = true,
                 // 2.x switches: the choice is now implied by the strategy itself
                 "--lean" | "--classic" => {}
@@ -247,12 +254,14 @@ pub fn cleanup_all() {
     backend::native_stop();
     backend::stop_all();
     session::set_warp_owned(false);
+    crate::dns::cleanup();
 }
 
 /// Cleanup for bypass mode: WARP is not touched (the user may be using it for something else).
 pub fn cleanup_engine_only() {
     backend::native_stop();
     backend::stop_all();
+    crate::dns::cleanup();
 }
 
 fn cleanup_verbose(had_warp: bool) {
@@ -275,6 +284,10 @@ fn cleanup_verbose(had_warp: bool) {
         }
     }
     session::set_warp_owned(false);
+    if crate::dns::is_applied() {
+        println!("{}", tr("Возвращаю DNS…", "Restoring DNS..."));
+        crate::dns::cleanup();
+    }
     ui::ok(tr("Всё остановлено.", "Everything has been stopped."));
 }
 
@@ -325,6 +338,35 @@ pub fn watch_target(cfg: &Config) -> String {
     if cfg.target.trim().is_empty() { "1.1.1.1".to_owned() } else { cfg.target.trim().to_owned() }
 }
 
+/// Applies the remembered (or `--dns`) encrypted-DNS choice. Called AFTER the engine is running, so
+/// that the DoH / DoT endpoints are reachable even where they are filtered. A failure never stops
+/// the session: DNS is an improvement, not a precondition.
+fn apply_dns(layout: &Layout, cfg: &Config, mode: Mode) {
+    let (choice, strict, plain) = crate::dns::saved(cfg);
+    if choice == crate::dns::Choice::Off {
+        return;
+    }
+    println!("{}", tr("Настраиваю DNS…", "Setting up DNS..."));
+    match crate::dns::apply(layout, choice, strict, plain) {
+        Ok(a) => {
+            crate::dns::print_applied(&a);
+            if mode == Mode::Warp {
+                println!("{}", tr("  В туннеле WARP имена разрешает сам WARP; этот DNS работает вне туннеля и до подключения.", "  Inside the WARP tunnel WARP resolves names itself; this DNS covers what is outside it and the time before it connects."));
+            }
+        }
+        Err(e) => ui::warn(&format!("DNS: {e}")),
+    }
+}
+
+/// Remembers `--dns` in the settings.
+fn remember_dns(cfg: &mut Config, a: &StartArgs) {
+    if let Some(v) = &a.dns {
+        if let Ok(c) = crate::dns::Choice::parse(v) {
+            cfg.dns = c.key().to_owned();
+        }
+    }
+}
+
 /// Starts the session and returns (the menu takes over). Headless: runs until stopped.
 pub fn start(layout: &Layout, a: StartArgs) -> Result<(), String> {
     if a.bypass {
@@ -339,6 +381,7 @@ pub fn start(layout: &Layout, a: StartArgs) -> Result<(), String> {
 
     let mut cfg = Config::load_with_legacy(&layout.cfg, &layout.cfg_legacy);
     let mut plan = select(&mut cfg, &a)?;
+    remember_dns(&mut cfg, &a);
     let _ = cfg.save(&layout.cfg);
     let target = watch_target(&cfg);
 
@@ -431,6 +474,7 @@ pub fn start(layout: &Layout, a: StartArgs) -> Result<(), String> {
     if connected {
         verify_and_report(&warp, &target, &a);
     }
+    apply_dns(layout, &cfg, Mode::Warp);
 
     session::begin(Active { mode: Mode::Warp, plan, layout: layout.clone(), native: use_native, started: Instant::now(), target });
     sys::arm_cleanup(true);
@@ -484,11 +528,13 @@ fn start_bypass(layout: &Layout, a: StartArgs) -> Result<(), String> {
 
     let mut cfg = Config::load_with_legacy(&layout.cfg, &layout.cfg_legacy);
     let plan = select(&mut cfg, &a)?;
+    remember_dns(&mut cfg, &a);
     let _ = cfg.save(&layout.cfg);
     let target = watch_target(&cfg);
 
     launch(layout, &plan, &a, false, false)?;
     sys::arm_cleanup(true);
+    apply_dns(layout, &cfg, Mode::Bypass);
 
     let mut first = Vec::new();
     if !a.no_probe && !a.headless {
@@ -537,6 +583,13 @@ pub fn stop() {
             Outcome::Done => ui::ok(&format!("{name} stopped / removed")),
             Outcome::Absent => ui::skip(&format!("{name}: nothing to remove")),
             Outcome::Failed(e) => ui::warn(&format!("{name}: {e}")),
+        }
+    }
+    if let Ok(l) = Layout::discover() {
+        match crate::dns::restore(&l) {
+            Ok(true) => ui::ok("DNS restored"),
+            Ok(false) => {}
+            Err(e) => ui::warn(&format!("DNS: {e}")),
         }
     }
     println!("Done: WARP disconnected, the packet engine stopped.");

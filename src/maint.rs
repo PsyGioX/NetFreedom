@@ -412,6 +412,8 @@ pub fn doctor(layout: &Layout) -> Result<(), String> {
         }
     };
     check(sys::is_elevated(), "administrator / root rights", "no administrator / root rights: start, tune and stop need them");
+    let stale = crate::dns::stale_owner(layout);
+    check(stale.is_none(), "DNS settings are clean", "DNS is still changed by a NetFreedom run that ended abnormally: run `netfreedom dns restore`");
     match backend::check_engine(layout) {
         Ok(()) => check(true, "packet engine files are in place", ""),
         Err(e) => check(false, "", &format!("packet engine: {}", e.lines().next().unwrap_or(""))),

@@ -25,6 +25,7 @@ pub mod backend;
 pub mod capture;
 pub mod config;
 pub mod dash;
+pub mod dns;
 pub mod engine;
 pub mod health;
 pub mod monitor;

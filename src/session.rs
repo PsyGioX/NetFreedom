@@ -185,4 +185,5 @@ pub fn cleanup() {
     }
     crate::backend::native_stop();
     crate::backend::stop_all();
+    crate::dns::cleanup();
 }

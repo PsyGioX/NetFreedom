@@ -143,6 +143,16 @@ pub fn lines() -> Vec<String> {
     };
     v.push(kv(tr("Сервер", "Host"), &host));
 
+    if let Some((p, t, rtt, fails)) = crate::dns::summary() {
+        let (c, state) = match (rtt, fails) {
+            (_, f) if f >= 3 => (RED, tr("не отвечает", "unreachable").to_owned()),
+            (Some(ms), 0) => (GREEN, format!("{} ms", fmt_ms(ms))),
+            (None, 0) => (DIM, tr("проверяется…", "checking...").to_owned()),
+            (_, _) => (YELLOW, tr("сбои проверки", "check failing").to_owned()),
+        };
+        v.push(kv("DNS", &format!("{} {} · {} · {}", dot(c), p.title, t.label(), state)));
+    }
+
     let eng = if engine_alive { format!("{} {}", dot(GREEN), tr("работает", "running")) } else { format!("{} {}", dot(RED), tr("остановлен", "stopped")) };
     let mut row = format!("{eng}  ({} {restarts})", tr("перезапусков", "restarts"));
     if let Some(up) = warp_up {

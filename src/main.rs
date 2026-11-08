@@ -18,6 +18,7 @@
 use std::io::{self, Write};
 
 use nf::config::Config;
+use nf::dns;
 use nf::crash;
 use nf::dash;
 use nf::health;
@@ -49,6 +50,7 @@ USAGE
   netfreedom list                     list strategies
   netfreedom doctor [--net [host]]    diagnose the system (drivers, services, lists, conflicts);
                                       --net adds Wi-Fi/cable, background traffic and latency under load
+  netfreedom dns [status|list|bench|set|restore]  encrypted DNS: Cloudflare, Google or Quad9 (DoH on Windows 11, DoT on Linux)
   netfreedom ipset [none|any|loaded]  switch the address filter (no argument: show it)
   netfreedom lists update             download fresh host and address lists
   netfreedom fakes [list|set ..]      show / change the fake packets (discord, game)
@@ -65,6 +67,7 @@ START OPTIONS
       --tcp <ports>      custom TCP ports (mode 3), e.g. 3074,27000-27100
       --udp <ports>      custom UDP ports (mode 3)
       --bypass           no WARP
+      --dns <name>       encrypted DNS for this session: cloudflare, google, quad9, auto (fastest) or off; remembered
       --headless         no prompts, run until stopped (used by autostart)
       --show-winws       show the winws console window (Windows)
       --no-probe         skip the quick check after start
@@ -175,6 +178,23 @@ fn dispatch(args: &[String]) -> (i32, bool) {
             install_warp();
             (0, true)
         }
+        "dns" => {
+            // only `restore` changes system settings and needs administrator rights
+            if rest.first().map(String::as_str) == Some("restore") && !sys::is_elevated() {
+                if sys::relaunch_elevated(args) {
+                    return (0, false);
+                }
+                ui::error(needs_admin_msg());
+                return (1, true);
+            }
+            match Layout::discover() {
+                Ok(l) => finish(dns::command(&l, rest), true),
+                Err(e) => {
+                    ui::error(&format!("cannot locate the program folder: {e}"));
+                    (1, true)
+                }
+            }
+        }
         "start" | "stop" | "tune" | "uninstall" | "doctor" | "ipset" | "lists" | "fakes" | "discord-clean" | "autostart" | "" => {
             if !sys::is_elevated() {
                 if sys::relaunch_elevated(args) {
@@ -193,6 +213,9 @@ fn dispatch(args: &[String]) -> (i32, bool) {
             // One handler for the whole run, installed before any thread exists: Ctrl+C, closing the
             // window, logoff and shutdown all undo what the session did (it only acts while armed).
             sys::install_cleanup_handler(session::cleanup);
+            if matches!(cmd, "start" | "" | "tune") {
+                dns::recover_stale(&layout); // a crashed run may have left its DNS behind
+            }
             match cmd {
                 "start" => start(&layout, rest),
                 "tune" => tune_cmd(&layout, rest),
@@ -447,6 +470,7 @@ fn menu(layout: &Layout) -> (i32, bool) {
         menu_item("7", ui::tr("Инструменты: списки, ipset, кэш Discord, автозапуск", "Tools: lists, ipset, Discord cache, autostart"), "");
         menu_item("8", ui::tr("Как установить Cloudflare WARP", "How to install Cloudflare WARP"), "");
         menu_item("9", ui::tr("О проекте", "About"), "");
+        menu_item("D", ui::tr("DNS (шифрованный)", "DNS (encrypted)"), &dns_hint(layout));
         menu_item("S", ui::tr("Аварийная остановка", "Emergency stop"), ui::tr("если что-то осталось после сбоя", "if something is left after a crash"));
         menu_item("L", "Язык / Language", if ui::is_ru() { "RU → EN" } else { "EN → RU" });
         if !active {
@@ -454,7 +478,7 @@ fn menu(layout: &Layout) -> (i32, bool) {
         }
         menu_item("0", ui::tr("Выход", "Exit"), if active { ui::tr("остановит всё", "stops everything") } else { "" });
         println!();
-        let keys = if active { "123456789SL0" } else { "123456789SLU0" };
+        let keys = if active { "123456789DSL0" } else { "123456789DSLU0" };
         match (ui::choice(ui::tr("Выбор: ", "Select: "), keys), active) {
             ('1', true) => {
                 run::stop_session();
@@ -498,6 +522,10 @@ fn menu(layout: &Layout) -> (i32, bool) {
                 let _ = io::stdout().write_all(ABOUT.as_bytes());
                 pause_back();
             }
+            ('D', _) => {
+                dns_menu(layout);
+                pause_back();
+            }
             ('S', _) => {
                 run::stop();
                 pause_back();
@@ -526,6 +554,70 @@ fn menu(layout: &Layout) -> (i32, bool) {
                 return (0, false);
             }
         }
+    }
+}
+
+fn dns_hint(layout: &Layout) -> String {
+    let c = Config::load_with_legacy(&layout.cfg, &layout.cfg_legacy);
+    let mut s = dns::Choice::parse(&c.dns).unwrap_or(dns::Choice::Off).title();
+    if dns::is_applied() {
+        s.push_str(ui::tr(" · применён", " · applied"));
+    }
+    s
+}
+
+/// Pick the DNS provider; applied right away when a session is running, otherwise at the next start.
+fn dns_menu(layout: &Layout) {
+    let cfg = Config::load_with_legacy(&layout.cfg, &layout.cfg_legacy);
+    println!("\n  {}: {}\n", ui::tr("Сейчас", "Now"), dns_hint(layout));
+    for (i, p) in dns::PROVIDERS.iter().enumerate() {
+        println!("  {}. {}  ({})", i + 1, p.title, p.v4[0]);
+    }
+    println!("  4. {}", ui::tr("Авто: самый быстрый на вашем соединении", "Auto: the fastest on your connection"));
+    println!("  5. {}", ui::tr("Не менять DNS системы", "Leave the system's DNS alone"));
+    println!("  6. {}", ui::tr("Замерить провайдеров", "Measure the providers"));
+    println!("  7. {}: {}", ui::tr("Строгий режим (без обычного DNS при сбое)", "Strict mode (no plain-DNS fallback)"), if cfg.dns_strict { "ON" } else { "off" });
+    println!("  0. {}\n", ui::tr("Назад", "Back"));
+    let pick = match ui::choice(ui::tr("Выбор: ", "Select: "), "12345670") {
+        '1' => dns::Choice::Fixed(&dns::PROVIDERS[0]),
+        '2' => dns::Choice::Fixed(&dns::PROVIDERS[1]),
+        '3' => dns::Choice::Fixed(&dns::PROVIDERS[2]),
+        '4' => dns::Choice::Auto,
+        '5' => dns::Choice::Off,
+        '6' => {
+            println!("{}", ui::tr("Измеряю (около 5 с)…", "Measuring (about 5 s)..."));
+            dns::print_bench(&dns::bench(10));
+            return;
+        }
+        '7' => {
+            save_cfg(layout, |c| c.dns_strict = !cfg.dns_strict);
+            ui::ok(ui::tr("Режим изменён; применится при следующем запуске или смене провайдера.", "Mode changed; it applies at the next start or provider change."));
+            return;
+        }
+        _ => return,
+    };
+    save_cfg(layout, |c| c.dns = pick.key().to_owned());
+    ui::ok(&format!("DNS: {}", pick.title()));
+    if !session::is_active() {
+        println!("{}", ui::tr("Применится при следующем запуске.", "It will be applied at the next start."));
+        return;
+    }
+    let cfg = Config::load_with_legacy(&layout.cfg, &layout.cfg_legacy);
+    let (choice, strict, plain) = dns::saved(&cfg);
+    let result = match (choice, dns::is_applied()) {
+        (dns::Choice::Off, true) => dns::restore(layout).map(|_| None),
+        (dns::Choice::Off, false) => Ok(None),
+        (dns::Choice::Fixed(p), true) => dns::switch(p).map(Some),
+        (c, true) => match c {
+            dns::Choice::Auto => dns::best(&dns::bench(6)).ok_or_else(|| "no provider is reachable".to_owned()).and_then(|p| dns::switch(p).map(Some)),
+            _ => Ok(None),
+        },
+        (c, false) => dns::apply(layout, c, strict, plain).map(Some),
+    };
+    match result {
+        Ok(Some(a)) => dns::print_applied(&a),
+        Ok(None) => ui::ok(ui::tr("DNS системы возвращён как был.", "The system's DNS is back as it was.")),
+        Err(e) => ui::warn(&format!("DNS: {e}")),
     }
 }
 
