@@ -29,7 +29,4 @@
 
 ## Правки после аудита (пункты 1, 3, 4, 5)
 Проверено на Linux: `cargo test --lib` (191 тест, все зелёные), `cargo check --all-targets` для Linux и для
-`x86_64-pc-windows-msvc` без предупреждений, `actionlint` для `release.yml`. **Не проверено:** реальный запуск на
-Windows (`icacls`, `schtasks`, `QueryFullProcessImageNameW`, завершение процессов) и запуск workflow на GitHub.
-Перед релизом: на чистой Windows 11 проверьте `autostart on` из `C:\NetFreedom` и из `Downloads` и прогоните
-workflow на тестовом теге (например `v3.3.0-test`).
+`x86_64-pc-windows-msvc` без предупреждений, `actionlint` для `release.yml`.
