@@ -357,14 +357,6 @@ python3 tools/gen_strategies.py > src/profiles_data.rs   # пересборка 
 SmartScreen и антивирусы осторожно относятся к новым неподписанным программам, особенно с драйвером
 перехвата пакетов. Кратко для пользователя: скачивайте только с Releases, сверяйте `Get-FileHash`, запускайте `netfreedom verify`.
 
-Для автора: мгновенного способа нет, доверие складывается из проверяемой сборки, подписи кода и репутации.
-Релизы собирайте только в GitHub Actions (`.github/workflows/release.yml`: контрольные суммы и аттестация
-происхождения, проверка: `gh attestation verify netfreedom.exe --repo PsyGioX/NetFreedom`). Бесплатная подпись для
-открытого ПО: SignPath Foundation (подходит GPL; издателем будет «SignPath Foundation»; заявку могут отклонить).
-Azure Artifact Signing физлицам доступен только в США и Канаде. Самоподписанный сертификат чужим компьютерам
-не поможет, а EV-сертификат мгновенной репутации с 2024 года не даёт: у каждого нового хеша репутация
-SmartScreen копится заново. Ложные срабатывания Defender отправляйте на microsoft.com/wdsi/filesubmission.
-
 ## Лицензия
 
 Copyright (C) 2026 Sergey (PsyGioX) <https://github.com/PsyGioX>
