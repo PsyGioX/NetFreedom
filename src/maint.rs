@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License along with
 // this program. If not, see <https://www.gnu.org/licenses/>.
 
-//! Everything the old `service.bat` menu did, natively: diagnostics, ipset mode, list updates,
+//! Everything the old `service.bat` menu did, natively: diagnostics, ipset mode,
 //! Discord cache cleanup, fake payload selection and autostart. No batch file, no PowerShell.
 //! The pure parts (classification, validation, text generation) are unit-tested.
 
@@ -92,94 +92,11 @@ pub fn ipset(layout: &Layout, arg: Option<&str>) -> Result<(), String> {
     let text = match want {
         IpsetMode::None => format!("{IPSET_NONE}\n"),
         IpsetMode::Any => String::new(),
-        IpsetMode::Loaded => fs::read_to_string(ipset_full(layout)).map_err(|_| "no saved list: run `netfreedom lists update` first".to_string())?,
+        IpsetMode::Loaded => fs::read_to_string(ipset_full(layout)).map_err(|_| "no saved list: put your list into lists/ipset-service.txt first".to_string())?,
     };
     fs::write(&file, text).map_err(|e| format!("cannot write {}: {e}", file.display()))?;
     ui::ok(&format!("ipset filter is now {want:?}. Restart the strategy for it to take effect."));
     Ok(())
-}
-
-// -------------------------------------------------------------------------------- list update
-
-const UPSTREAM: &str = "https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/refs/heads/main/";
-/// (upstream path, local file, minimum plausible number of lines)
-const LIST_FILES: [(&str, &str, usize); 5] = [
-    (".service/ipset-service.txt", "ipset-service.txt", 1000),
-    ("lists/list-general.txt", "list-general.txt", 5),
-    ("lists/list-google.txt", "list-google.txt", 2),
-    ("lists/list-exclude.txt", "list-exclude.txt", 1),
-    ("lists/ipset-exclude.txt", "ipset-exclude.txt", 1),
-];
-
-/// A downloaded list is accepted only if it looks like a list: not an HTML error page, not empty,
-/// not suspiciously short, only printable text.
-pub fn valid_list(text: &str, min_lines: usize) -> bool {
-    let lines = text.lines().filter(|l| !l.trim().is_empty()).count();
-    lines >= min_lines
-        && text.len() <= 8_000_000
-        && !text.contains("<html")
-        && !text.contains("<!DOCTYPE")
-        && text.chars().all(|c| !c.is_control() || matches!(c, '\n' | '\r' | '\t'))
-        && text.lines().all(plausible_entry)
-}
-
-/// One line of a list: empty, a `#` comment, or only what a domain / IP / CIDR can consist of.
-/// (Defence in depth: the lists come from a third-party repository and feed a root-run engine.)
-fn plausible_entry(line: &str) -> bool {
-    let l = line.trim();
-    l.is_empty() || l.starts_with('#') || (l.len() <= 253 && l.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '/' | '*')))
-}
-
-/// A refresh that would shrink a list to less than half is more likely truncated or tampered
-/// with than genuine.
-pub fn plausible_update(old_lines: usize, new_lines: usize) -> bool {
-    old_lines < 20 || new_lines * 2 >= old_lines
-}
-
-fn count_lines(p: &Path) -> usize {
-    fs::read_to_string(p).map(|t| t.lines().filter(|l| !l.trim().is_empty()).count()).unwrap_or(0)
-}
-
-fn download(url: &str) -> Result<String, String> {
-    let mut cmd = crate::web::curl_command();
-    // --max-filesize: a list is a few hundred KB; refuse anything absurd instead of filling the disk
-    cmd.args(["-sS", "-f", "--max-filesize", "8000000", "--connect-timeout", "10", "-m", "60", url]);
-    let o = cmd.output().map_err(|e| format!("cannot run curl: {e}"))?;
-    if !o.status.success() {
-        return Err(String::from_utf8_lossy(&o.stderr).trim().to_owned());
-    }
-    String::from_utf8(o.stdout).map_err(|_| "not text".to_owned())
-}
-
-pub fn lists_update(layout: &Layout) -> Result<(), String> {
-    if !web::curl_available() {
-        return Err("curl was not found (it ships with Windows 10+ and Linux).".into());
-    }
-    let was = classify_ipset(&fs::read_to_string(ipset_file(layout)).unwrap_or_default());
-    let mut failed = 0;
-    for (remote, local, min) in LIST_FILES {
-        let dest = Path::new(&layout.lists).join(local);
-        match download(&format!("{UPSTREAM}{remote}")) {
-            Ok(text) if valid_list(&text, min) && plausible_update(count_lines(&dest), text.lines().filter(|l| !l.trim().is_empty()).count()) => {
-                let _ = fs::copy(&dest, dest.with_extension("txt.bak"));
-                let tmp = dest.with_extension("txt.new");
-                fs::write(&tmp, text).and_then(|_| fs::rename(&tmp, &dest)).map_err(|e| format!("{local}: {e}"))?;
-                ui::ok(&format!("{local} updated"));
-            }
-            Ok(_) => {
-                failed += 1;
-                ui::warn(&format!("{local}: the download does not look like a list, kept the old one"));
-            }
-            Err(e) => {
-                failed += 1;
-                ui::warn(&format!("{local}: {e}"));
-            }
-        }
-    }
-    if was == IpsetMode::Loaded && ipset_full(layout).exists() {
-        let _ = fs::copy(ipset_full(layout), ipset_file(layout));
-    }
-    if failed == 0 { Ok(()) } else { Err(format!("{failed} file(s) could not be updated; the old ones are untouched")) }
 }
 
 // ------------------------------------------------------------------------------ Discord cache
@@ -217,8 +134,45 @@ fn discord_bases() -> Vec<PathBuf> {
     v
 }
 
+/// The folders Discord is installed in (Windows): the per-user Squirrel install and Program Files.
+/// A process named like Discord that runs from anywhere else is not Discord.
+pub fn discord_roots(local_app_data: Option<&str>, program_files: &[String]) -> Vec<String> {
+    let mut v = Vec::new();
+    for name in ["Discord", "DiscordPTB", "DiscordCanary", "DiscordDevelopment"] {
+        if let Some(l) = local_app_data.filter(|l| !l.is_empty()) {
+            v.push(format!("{}\\{name}", l.trim_end_matches(['\\', '/'])));
+        }
+        v.extend(program_files.iter().map(|pf| format!("{}\\{name}", pf.trim_end_matches(['\\', '/']))));
+    }
+    v
+}
+
+/// Closes Discord. Windows: only processes that run from a Discord install folder (the name alone
+/// proves nothing and this runs with administrator rights). Linux: by process name, as before
+/// (the same user could only end its own processes anyway).
+fn close_discord() -> usize {
+    #[cfg(windows)]
+    {
+        let roots = discord_roots(std::env::var("LOCALAPPDATA").ok().as_deref(), &crate::util::program_files_dirs());
+        let (mut ended, mut skipped) = (0, 0);
+        for n in ["Discord.exe", "DiscordPTB.exe", "DiscordCanary.exe"] {
+            let (e, s) = sys::kill_by_name_in(n, &roots);
+            ended += e;
+            skipped += s;
+        }
+        if skipped > 0 {
+            ui::warn(&format!("{skipped} process(es) named like Discord were left alone: they do not run from a Discord install folder"));
+        }
+        ended
+    }
+    #[cfg(unix)]
+    {
+        ["Discord.exe", "Discord", "DiscordPTB.exe", "DiscordCanary.exe"].iter().map(|n| sys::kill_by_name(n)).sum::<usize>()
+    }
+}
+
 pub fn discord_clean() -> Result<(), String> {
-    let killed = ["Discord.exe", "Discord", "DiscordPTB.exe", "DiscordCanary.exe"].iter().map(|n| sys::kill_by_name(n)).sum::<usize>();
+    let killed = close_discord();
     if killed > 0 {
         ui::ok("Discord was closed");
     }
@@ -296,6 +250,85 @@ fn quote(a: &str) -> String {
     if a.contains([' ', '\t', '"']) { format!("\"{}\"", a.replace('"', "\\\"")) } else { a.to_owned() }
 }
 
+/// The autostart entry runs this program with administrator rights at every logon, so whoever can
+/// replace `netfreedom.exe` or `bin\\WinDivert.dll` gets administrator rights too. Where the folder
+/// is decides what is needed.
+#[derive(Debug, PartialEq)]
+pub enum AutostartPlace {
+    /// Inside Program Files: only administrators can change it.
+    Safe,
+    /// An ordinary folder (`C:\\NetFreedom`): acceptable once its permissions are limited to administrators.
+    NeedsLock,
+    /// Inside a user profile (Downloads, Desktop, ...): the user can always rename or replace the
+    /// folder itself, so locking the files inside would not help. Autostart is refused.
+    Refused(String),
+}
+
+/// `admin_roots`: folders only administrators can write to (Program Files). `user_roots`: the user
+/// profile folders and the folder holding all profiles.
+pub fn autostart_place(exe: &str, admin_roots: &[String], user_roots: &[String]) -> AutostartPlace {
+    if admin_roots.iter().any(|r| crate::safety::is_inside(exe, r)) {
+        return AutostartPlace::Safe;
+    }
+    if let Some(r) = user_roots.iter().find(|r| crate::safety::is_inside(exe, r)) {
+        return AutostartPlace::Refused(format!(
+            "NetFreedom runs from {r}, where any program of your user account can replace it, and the autostart entry would start it with administrator rights. Move the whole NetFreedom folder to C:\\Program Files (or to a folder such as C:\\NetFreedom) and run `netfreedom autostart on` from there."
+        ));
+    }
+    AutostartPlace::NeedsLock
+}
+
+/// The `icacls` calls (arguments only, no shell) that make `dir` writable by administrators only:
+/// 1. the owner becomes Administrators (an owner can always rewrite the permissions),
+/// 2. inheritance is cut and only SYSTEM and Administrators (full) and Users (read/execute) remain,
+/// 3. everything inside is reset to inherit exactly that.
+pub fn icacls_lock_steps(dir: &str) -> [Vec<String>; 3] {
+    let d = dir.trim_end_matches(['\\', '/']).to_owned();
+    let v = |a: &[&str]| a.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+    let mut s1 = vec![d.clone()];
+    s1.extend(v(&["/setowner", "*S-1-5-32-544", "/T", "/Q"]));
+    let mut s2 = vec![d.clone()];
+    s2.extend(v(&["/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-32-545:(OI)(CI)RX", "/Q"]));
+    let mut s3 = vec![format!("{d}\\*")];
+    s3.extend(v(&["/reset", "/T", "/Q"]));
+    [s1, s2, s3]
+}
+
+/// Windows: limits the folder of `exe` to administrators (see [`icacls_lock_steps`]). Refuses
+/// folders that are or contain Desktop, Documents, Downloads, the profile, Windows, ... and folders
+/// that do not look like a NetFreedom package.
+#[cfg(windows)]
+fn lock_install_folder(exe: &str) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    let dir = Path::new(exe).parent().ok_or("cannot find the folder of netfreedom.exe")?;
+    if let Some(why) = crate::uninstall::folder_problem(dir) {
+        return Err(format!("not changing the permissions of {}: {why}", dir.display()));
+    }
+    for step in icacls_lock_steps(&dir.to_string_lossy()) {
+        let out = Command::new(crate::util::system_tool("icacls"))
+            .args(&step)
+            .stdin(Stdio::null())
+            .creation_flags(0x0800_0000)
+            .output()
+            .map_err(|e| format!("cannot run icacls: {e}"))?;
+        if !out.status.success() {
+            let msg = format!("{} {}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            return Err(format!("icacls {} failed: {}", step.get(1).map_or("", String::as_str), msg.trim()));
+        }
+    }
+    Ok(())
+}
+
+/// Windows: the folders in which a program of an ordinary user can always replace things.
+#[cfg(windows)]
+fn user_profile_roots() -> Vec<String> {
+    let mut v: Vec<String> = ["USERPROFILE", "OneDrive", "OneDriveConsumer", "OneDriveCommercial", "PUBLIC"].iter().filter_map(|k| std::env::var(k).ok()).filter(|s| !s.is_empty()).collect();
+    if let Some(all) = std::env::var("USERPROFILE").ok().and_then(|p| Path::new(&p).parent().map(|d| d.to_string_lossy().into_owned())) {
+        v.push(all); // C:\Users: every profile, Public included
+    }
+    v
+}
+
 /// Command line that the autostart entry runs.
 pub fn autostart_command(exe: &str, start_args: &[String]) -> String {
     let mut parts = vec![quote(exe), "start".to_owned(), "--headless".to_owned()];
@@ -348,6 +381,15 @@ pub fn autostart(args: &[String]) -> Result<(), String> {
             let start_args = &args[1..];
             #[cfg(windows)]
             {
+                match autostart_place(&exe, &crate::util::program_files_dirs(), &user_profile_roots()) {
+                    AutostartPlace::Safe => {}
+                    AutostartPlace::Refused(why) => return Err(format!("autostart was NOT enabled: {why}")),
+                    AutostartPlace::NeedsLock => {
+                        lock_install_folder(&exe).map_err(|e| format!("autostart was NOT enabled: {e}"))?;
+                        ui::ok("The NetFreedom folder can now be changed only by administrators (so that nobody can swap netfreedom.exe or WinDivert.dll).");
+                        ui::warn("Editing the list files and netfreedom.cfg now needs an administrator (e.g. Notepad run as administrator). The folder must stay where no ordinary user can rename it (not under a user folder).");
+                    }
+                }
                 let cmd = autostart_command(&exe, start_args);
                 if !run_quiet("schtasks", &["/Create", "/TN", TASK, "/TR", &cmd, "/SC", "ONLOGON", "/RL", "HIGHEST", "/F"]) {
                     return Err("schtasks refused to create the task (run as administrator)".into());
@@ -421,11 +463,11 @@ pub fn doctor(layout: &Layout) -> Result<(), String> {
     #[cfg(windows)]
     check(Command::new(crate::util::system_tool("sc")).args(["query", "BFE"]).output().is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("RUNNING")), "Base Filtering Engine service is running", "Base Filtering Engine (BFE) is not running: WinDivert cannot work without it");
     for f in ["list-general.txt", "ipset-all.txt", "list-google.txt", "list-social.txt", "ipset-social.txt", "list-dev.txt"] {
-        check(Path::new(&layout.lists).join(f).exists(), &format!("lists/{f}"), &format!("lists/{f} is missing: run `netfreedom lists update`"));
+        check(Path::new(&layout.lists).join(f).exists(), &format!("lists/{f}"), &format!("lists/{f} is missing: restore it from the release archive (the program no longer downloads lists)"));
     }
     let mode = classify_ipset(&fs::read_to_string(ipset_file(layout)).unwrap_or_default());
     println!("      ipset filter: {mode:?}");
-    check(web::curl_available(), "curl is available (tune --bypass, lists update)", "curl was not found: `tune --bypass` and `lists update` need it");
+    check(web::curl_available(), "curl is available (tune --bypass)", "curl was not found: `tune --bypass` needs it");
     match Warp::locate() {
         Some(_) => check(true, "Cloudflare WARP is installed", ""),
         None => println!("      Cloudflare WARP is not installed (only needed for games via WARP: `netfreedom install-warp`)"),
@@ -458,23 +500,23 @@ mod tests {
     }
 
     #[test]
-    fn downloaded_lists_are_validated() {
-        let good = "1.0.0.0/24\n".repeat(1200);
-        assert!(valid_list(&good, 1000));
-        assert!(!valid_list("<!DOCTYPE html><title>404</title>", 1));
-        assert!(!valid_list("a\nb\n", 5), "too short is suspicious");
-        assert!(!valid_list("a\u{0}b\n", 1), "control characters are refused");
-        assert!(!valid_list("example.com\n--flag=$(x)\n", 1), "shell-ish junk is refused");
-        assert!(valid_list("# c\nexample.com\n2001:db8::/32\n*.x-y.org\n", 3));
-        assert!(plausible_update(1000, 900) && !plausible_update(1000, 100) && plausible_update(5, 1));
-    }
-
-    #[test]
     fn only_known_discord_cache_folders_are_ever_deleted() {
         let d = discord_cache_dirs(Path::new("/home/u/.config/discord"));
         assert_eq!(d.len(), 3);
         assert!(d.iter().all(|p| p.starts_with("/home/u/.config/discord")));
         assert!(discord_cache_dirs(Path::new("/home/u/Documents")).is_empty(), "other folders are never touched");
+    }
+
+    #[test]
+    fn discord_is_only_closed_when_it_runs_from_its_install_folder() {
+        let roots = discord_roots(Some(r"C:\Users\u\AppData\Local"), &[r"C:\Program Files".to_owned()]);
+        let ok = |p: &str| roots.iter().any(|r| crate::safety::is_inside(p, r));
+        assert!(ok(r"C:\Users\u\AppData\Local\Discord\app-1.0.9\Discord.exe"));
+        assert!(ok(r"c:\users\u\appdata\local\discordptb\app-1\DiscordPTB.exe"), "case does not matter");
+        assert!(!ok(r"C:\Users\u\Downloads\Discord.exe"), "same name, other folder");
+        assert!(!ok(r"C:\Users\u\AppData\Local\DiscordEvil\Discord.exe"), "folder boundary");
+        assert!(!ok(r"C:\Users\u\AppData\Local\Discord\..\Temp\Discord.exe"), "no .. tricks");
+        assert!(discord_roots(None, &[]).is_empty());
     }
 
     #[test]
@@ -492,5 +534,34 @@ mod tests {
         let u = systemd_unit("/usr/local/bin/netfreedom", &[]);
         assert!(u.contains("ExecStart=/usr/local/bin/netfreedom start --headless\n"));
         assert!(u.contains("ExecStopPost=/usr/local/bin/netfreedom stop"));
+    }
+
+    #[test]
+    fn autostart_place_decides_between_ok_lock_and_refuse() {
+        let admin = vec!["C:\\Program Files".to_string()];
+        let user = vec!["C:\\Users\\me".to_string(), "C:\\Users".to_string()];
+        let place = |p: &str| autostart_place(p, &admin, &user);
+        assert_eq!(place("C:\\Program Files\\NetFreedom\\netfreedom.exe"), AutostartPlace::Safe);
+        assert_eq!(place("c:\\program files\\NetFreedom\\netfreedom.exe"), AutostartPlace::Safe, "case does not matter");
+        for bad in ["C:\\Users\\me\\Downloads\\NetFreedom\\netfreedom.exe", "C:\\Users\\me\\Desktop\\netfreedom.exe", "C:\\Users\\Public\\nf\\netfreedom.exe", "C:\\Users\\other\\nf\\netfreedom.exe"] {
+            assert!(matches!(place(bad), AutostartPlace::Refused(_)), "{bad}");
+        }
+        assert_eq!(place("C:\\NetFreedom\\netfreedom.exe"), AutostartPlace::NeedsLock);
+        assert_eq!(place("D:\\Tools\\nf\\netfreedom.exe"), AutostartPlace::NeedsLock);
+        assert_eq!(place("C:\\Program Files Evil\\netfreedom.exe"), AutostartPlace::NeedsLock, "prefix of the name is not inside the folder");
+        assert_eq!(place("C:\\Program Files\\..\\Temp\\netfreedom.exe"), AutostartPlace::NeedsLock, "no .. tricks");
+    }
+
+    #[test]
+    fn icacls_steps_leave_ordinary_users_read_only() {
+        let [owner, acl, reset] = icacls_lock_steps("C:\\NetFreedom\\");
+        assert_eq!(owner, ["C:\\NetFreedom", "/setowner", "*S-1-5-32-544", "/T", "/Q"]);
+        assert_eq!(acl[0], "C:\\NetFreedom");
+        assert!(acl.contains(&"/inheritance:r".to_string()), "inherited permissions are cut");
+        let grants: Vec<&String> = acl.iter().filter(|a| a.contains(":(OI)(CI)")).collect();
+        assert_eq!(grants.len(), 3);
+        assert!(grants.iter().any(|g| g.starts_with("*S-1-5-32-545:") && g.ends_with("RX")), "Users: read and execute only");
+        assert!(grants.iter().all(|g| g.starts_with("*S-1-5-18:") || g.starts_with("*S-1-5-32-544:") || g.ends_with("RX")), "only SYSTEM and Administrators get more");
+        assert_eq!(reset, ["C:\\NetFreedom\\*", "/reset", "/T", "/Q"], "the folder itself is not reset, only what is inside");
     }
 }

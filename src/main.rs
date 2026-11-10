@@ -37,11 +37,11 @@ use nf::uninstall;
 const HELP: &str = "\
 NetFreedom - an open, local, reversible way to reach the open Internet
 Games through Cloudflare WARP, or direct bypass of blocks (YouTube, Discord, Cloudflare sites).
-Windows: winws + WinDivert.  Linux: nfqws + nftables.
+Windows: built-in engine + WinDivert driver.  Linux: nfqws + nftables.
 
 USAGE
   netfreedom                          interactive menu
-  netfreedom start [options]          games: zapret protects the WARP handshake, WARP carries the traffic
+  netfreedom start [options]          games: the engine protects the WARP handshake, WARP carries the traffic
   netfreedom start --bypass [options] no WARP: unblock sites, YouTube and Discord directly
   netfreedom tune [--bypass]          measure EVERY strategy on your connection and pick the best
   netfreedom stop                     emergency stop (WARP and the packet engine)
@@ -52,7 +52,6 @@ USAGE
                                       --net adds Wi-Fi/cable, background traffic and latency under load
   netfreedom dns [status|list|bench|set|restore]  encrypted DNS: Cloudflare, Google or Quad9 (DoH on Windows 11, DoT on Linux)
   netfreedom ipset [none|any|loaded]  switch the address filter (no argument: show it)
-  netfreedom lists update             download fresh host and address lists
   netfreedom fakes [list|set ..]      show / change the fake packets (discord, game)
   netfreedom discord-clean            clear the Discord cache (fixes stuck voice / updates)
   netfreedom autostart <on|off|status> run at logon (Windows task) / boot (systemd)
@@ -69,9 +68,7 @@ START OPTIONS
       --bypass           no WARP
       --dns <name>       encrypted DNS for this session: cloudflare, google, quad9, auto (fastest) or off; remembered
       --headless         no prompts, run until stopped (used by autostart)
-      --show-winws       show the winws console window (Windows)
       --no-probe         skip the quick check after start
-      --native           EXPERIMENTAL (Windows): packet engine inside this process, WARP strategies only
   -v, --verbose          print the engine command line
 
 TUNE OPTIONS
@@ -237,13 +234,6 @@ fn dispatch(args: &[String]) -> (i32, bool) {
                     finish(r, true)
                 }
                 "ipset" => finish(maint::ipset(&layout, rest.first().map(String::as_str)), true),
-                "lists" => match rest.first().map(String::as_str) {
-                    Some("update") => finish(maint::lists_update(&layout), true),
-                    _ => {
-                        ui::error("use: netfreedom lists update");
-                        (2, true)
-                    }
-                },
                 "fakes" => finish(maint::fakes(&layout, rest), true),
                 "discord-clean" => finish(maint::discord_clean(), true),
                 "autostart" => finish(maint::autostart(rest), true),
@@ -622,22 +612,20 @@ fn dns_menu(layout: &Layout) {
 }
 
 fn tools_menu(layout: &Layout) {
-    println!("\n  1. Update host and address lists");
-    println!("  2. Address filter (ipset): show / change");
-    println!("  3. Clear the Discord cache");
-    println!("  4. Fake packets: show");
-    println!("  5. Autostart: show / enable / disable");
+    println!("\n  1. Address filter (ipset): show / change");
+    println!("  2. Clear the Discord cache");
+    println!("  3. Fake packets: show");
+    println!("  4. Autostart: show / enable / disable");
     println!("  0. Back\n");
-    let r = match ui::choice("Select: ", "123450") {
-        '1' => maint::lists_update(layout),
-        '2' => {
+    let r = match ui::choice("Select: ", "12340") {
+        '1' => {
             let _ = maint::ipset(layout, None);
             let a = ui::ask("Change to none / any / loaded (Enter = keep)", "");
             if a.is_empty() { Ok(()) } else { maint::ipset(layout, Some(&a)) }
         }
-        '3' => maint::discord_clean(),
-        '4' => maint::fakes(layout, &[]),
-        '5' => {
+        '2' => maint::discord_clean(),
+        '3' => maint::fakes(layout, &[]),
+        '4' => {
             let _ = maint::autostart(&[]);
             match ui::choice("[E]nable (bypass or WARP, last used strategy), [D]isable, [B]ack: ", "EDB") {
                 'E' => {

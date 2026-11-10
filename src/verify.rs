@@ -162,7 +162,7 @@ pub fn parse_sums(text: &str) -> Vec<(String, String)> {
 #[derive(Debug, PartialEq)]
 pub enum Verdict {
     Ok,
-    /// A list or user file: changing it is normal (`lists update`, your own entries).
+    /// A list or user file: changing it is normal (your own entries).
     Changed,
     Mismatch,
     Missing,
@@ -248,15 +248,15 @@ mod tests {
     #[test]
     fn sums_file_is_parsed() {
         let h = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-        let v = parse_sums(&format!("{h}  bin/winws.exe\r\n{h} *lists/a b.txt\nnot a line\n{}  x\n", "z".repeat(64)));
-        assert_eq!(v, vec![(h.to_owned(), "bin/winws.exe".to_owned()), (h.to_owned(), "lists/a b.txt".to_owned())]);
+        let v = parse_sums(&format!("{h}  bin/WinDivert.dll\r\n{h} *lists/a b.txt\nnot a line\n{}  x\n", "z".repeat(64)));
+        assert_eq!(v, vec![(h.to_owned(), "bin/WinDivert.dll".to_owned()), (h.to_owned(), "lists/a b.txt".to_owned())]);
     }
 
     #[test]
     fn only_lists_and_user_files_may_change() {
         assert_eq!(judge("netfreedom.exe", "a", Some("a")), Verdict::Ok);
         assert_eq!(judge("netfreedom.exe", "a", Some("b")), Verdict::Mismatch, "a changed program is an alarm");
-        assert_eq!(judge("bin/winws.exe", "a", Some("b")), Verdict::Mismatch);
+        assert_eq!(judge("bin/WinDivert.dll", "a", Some("b")), Verdict::Mismatch);
         assert_eq!(judge("lists/list-general.txt", "a", Some("b")), Verdict::Changed);
         assert_eq!(judge("bin/x.bin", "a", None), Verdict::Missing);
     }

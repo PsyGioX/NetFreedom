@@ -149,3 +149,12 @@ mod tests {
         assert_eq!(extract_guid("{1A2B3C4D-0000-4abc-9DEF-0123456789A}"), None);
     }
 }
+
+/// The folders only administrators can write to: Program Files (native, 64-bit and 32-bit).
+#[cfg(windows)]
+pub fn program_files_dirs() -> Vec<String> {
+    let mut v: Vec<String> = ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"].iter().filter_map(|k| std::env::var(k).ok()).filter(|s| !s.is_empty()).collect();
+    v.sort_by_key(|s| s.to_lowercase());
+    v.dedup_by_key(|s| s.to_lowercase());
+    v
+}

@@ -15,19 +15,24 @@
 // You should have received a copy of the GNU General Public License along with
 // this program. If not, see <https://www.gnu.org/licenses/>.
 
-//! netfreedom: games through Cloudflare WARP with zapret handling the handshake.
+//! netfreedom: games through Cloudflare WARP with a DPI-evasion engine handling the handshake.
 //!
-//! Windows: winws + WinDivert. Linux: nfqws + nftables (NFQUEUE). The platform-independent logic
+//! Windows: the built-in engine (`engine`, `native`) on the WinDivert driver. Linux: nfqws + nftables (NFQUEUE). The platform-independent logic
 //! (profiles, capture settings, config, statistics, the native engine model, nft rule generation)
 //! is unit-tested on any OS; everything that touches the OS sits behind `cfg`.
 
 pub mod backend;
 pub mod capture;
 pub mod config;
+pub mod crypto;
 pub mod dash;
 pub mod dns;
 pub mod engine;
+pub mod faketls;
 pub mod health;
+pub mod hostlist;
+pub mod http;
+pub mod ipset;
 pub mod monitor;
 pub mod netdiag;
 pub mod session;
@@ -37,9 +42,12 @@ pub mod probe;
 pub mod profiles;
 mod profiles_data;
 pub mod quic;
+pub mod quic_sni;
 pub mod run;
 pub mod safety;
 pub mod stats;
+pub mod tcp;
+pub mod tls;
 pub mod tune;
 pub mod ui;
 pub mod util;
@@ -52,7 +60,7 @@ pub mod sys;
 #[cfg(windows)]
 pub mod uninstall;
 #[cfg(windows)]
-pub mod winws;
+pub mod windivert;
 
 #[cfg(unix)]
 pub mod nfqws;
@@ -68,3 +76,6 @@ pub mod crash;
 pub mod maint;
 pub mod web;
 pub mod verify;
+
+#[cfg(test)]
+mod fuzz_engine;

@@ -59,9 +59,20 @@ pub struct WebResult {
     pub note: String,
 }
 
+/// The TSPU cuts / throttles a connection after ~16 KB. An answer smaller than that proves only that
+/// the TLS handshake got through, not that real traffic (a video, a file) will.
+pub const SHALLOW_BYTES: u64 = 16_384;
+
 impl WebResult {
+    /// Passed, but too little data moved to say that the bypass really carries traffic.
+    pub fn shallow(&self) -> bool {
+        self.ok && self.bytes < SHALLOW_BYTES
+    }
+
     pub fn line(&self) -> String {
-        if self.ok {
+        if self.shallow() {
+            format!("{:<20} OK*   {:>7} bytes in {:.1} s (connection only, transfer not verified)", self.name, self.bytes, self.secs)
+        } else if self.ok {
             format!("{:<20} OK    {:>7} bytes in {:.1} s", self.name, self.bytes, self.secs)
         } else {
             format!("{:<20} FAIL  {}", self.name, self.note)
@@ -140,7 +151,7 @@ const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 /// window, no stdin, HTTPS only (also for redirects) and TLS 1.2+.
 pub fn curl_command() -> Command {
     let mut cmd = Command::new(crate::util::system_tool("curl"));
-    cmd.args(["--proto", "=https", "--proto-redir", "=https", "--tlsv1.2"]).stdin(Stdio::null());
+    cmd.args(["--proto", "=https", "--proto-redir", "=https", "--tlsv1.2", "--noproxy", "*"]).stdin(Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -275,6 +286,18 @@ mod tests {
         assert!(t0.elapsed() < Duration::from_millis(500));
         assert_eq!(r.len(), TARGETS.len());
         assert!(r.iter().all(|x| !x.ok && x.note.starts_with("skipped")));
+    }
+
+    #[test]
+    fn a_tiny_answer_is_not_a_proof_of_a_working_bypass() {
+        let yt = TARGETS.iter().find(|t| t.name == "YouTube").unwrap();
+        let r = judge(yt, true, 204, 0, 0.2, "");
+        assert!(r.ok && r.shallow(), "a 204 passes but proves only the handshake");
+        assert!(r.line().contains("OK*"));
+        let cf = &TARGETS[0];
+        let full = judge(cf, true, 200, 300_000, 0.9, "");
+        assert!(full.ok && !full.shallow() && !full.line().contains('*'));
+        assert!(!judge(yt, true, 503, 0, 0.2, "").shallow(), "a failure is not shallow, it is a failure");
     }
 
     #[test]

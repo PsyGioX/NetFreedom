@@ -234,21 +234,62 @@ pub fn is_running(name: &str) -> bool {
     !pids_by_name(name).is_empty()
 }
 
+fn terminate(pid: u32) -> bool {
+    unsafe {
+        let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if h.is_null() {
+            return false;
+        }
+        let ok = TerminateProcess(h, 1) != 0;
+        CloseHandle(h);
+        ok
+    }
+}
+
 /// Terminates every process with that image name. Returns how many were killed.
+/// The name alone proves nothing (any program can be called `Discord.exe`): where the expected
+/// install folder is known, use [`kill_by_name_in`] or [`kill_matching`] instead.
 pub fn kill_by_name(name: &str) -> usize {
-    let mut n = 0;
+    pids_by_name(name).into_iter().filter(|&pid| terminate(pid)).count()
+}
+
+/// Full path of the program a process runs (`None` if it cannot be queried).
+pub fn image_path(pid: u32) -> Option<String> {
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return None;
+        }
+        let mut buf = vec![0u16; 4096];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(h, 0, buf.as_mut_ptr(), &mut len) != 0;
+        CloseHandle(h);
+        (ok && len > 0).then(|| from_wide(&buf[..len as usize]))
+    }
+}
+
+/// Terminates the processes called `name` whose executable path satisfies `wanted`, never this
+/// process. A process whose path cannot be read is NOT terminated. Returns (ended, left alone).
+pub fn kill_matching(name: &str, wanted: impl Fn(&str) -> bool) -> (usize, usize) {
+    let me = std::process::id();
+    let (mut ended, mut skipped) = (0, 0);
     for pid in pids_by_name(name) {
-        unsafe {
-            let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
-            if !h.is_null() {
-                if TerminateProcess(h, 1) != 0 {
-                    n += 1;
-                }
-                CloseHandle(h);
-            }
+        if pid == me {
+            continue;
+        }
+        if image_path(pid).is_some_and(|p| wanted(&p)) && terminate(pid) {
+            ended += 1;
+        } else {
+            skipped += 1;
         }
     }
-    n
+    (ended, skipped)
+}
+
+/// Like [`kill_by_name`], but only for processes started from a file inside one of the `roots`
+/// folders. Returns (ended, left alone).
+pub fn kill_by_name_in(name: &str, roots: &[String]) -> (usize, usize) {
+    kill_matching(name, |p| roots.iter().any(|r| crate::safety::is_inside(p, r)))
 }
 
 // ------------------------------------------------------------------- services

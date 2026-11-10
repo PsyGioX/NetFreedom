@@ -1,0 +1,7 @@
+# Keeps the commit SHAs the workflow pins its actions to up to date (a pinned SHA never moves by itself).
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

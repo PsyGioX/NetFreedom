@@ -7,6 +7,15 @@
 # Builds the Windows release from a version tag, writes SHA256SUMS.txt and attaches a signed build
 # provenance attestation, so anybody can prove with `gh attestation verify` that the exe came from
 # this repository. NOT RUN YET: try it with a tag such as v3.0.0-test first.
+#
+# Three jobs, each with only the rights it needs:
+#   build    compiles and tests; the only job with a third-party action; no secrets, read-only token.
+#   package  signs the exe and assembles the package; holds the signing certificate, uses only
+#            actions published by GitHub itself and has a read-only token.
+#   release  attests and publishes; the only job that may write to the repository; runs no build
+#            tools and no third-party action (the release is created with the preinstalled `gh`).
+# Every action is pinned to a commit SHA (the tag is in the comment). Update them with Dependabot
+# (.github/dependabot.yml): a tag can be moved, a commit cannot.
 
 name: release
 
@@ -14,25 +23,49 @@ on:
   push:
     tags: ["v*"]
 
-permissions:
-  contents: write       # create the release
-  id-token: write       # sign the attestation
-  attestations: write   # store the attestation
+# Nothing by default; every job asks for what it needs.
+permissions: {}
 
 jobs:
-  windows:
+  build:
     runs-on: windows-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
       # rc.exe (resource compiler) must be on PATH, otherwise the icon is not embedded
-      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
 
       - name: Test
         run: cargo test --locked
 
       - name: Build
         run: cargo build --release --locked
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: netfreedom-unsigned
+          path: target/release/netfreedom.exe
+          if-no-files-found: error
+          retention-days: 1
+
+  package:
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: netfreedom-unsigned
+          path: target/release
 
       # Authenticode signing: this is what makes the UAC prompt show "Verified publisher: PsyGioX".
       # Needs a code-signing certificate whose subject (CN) is PsyGioX, stored as repo secrets:
@@ -53,6 +86,8 @@ jobs:
 
       - name: Assemble the package
         shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
           Copy-Item -Recurse dist/windows package
           Copy-Item target/release/netfreedom.exe package/netfreedom.exe
@@ -64,21 +99,44 @@ jobs:
             "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $rel
           } | Sort-Object { $_.Substring(66) } | Set-Content -Encoding ascii SHA256SUMS.txt
           Pop-Location
-          Compress-Archive -Path package/* -DestinationPath "NetFreedom-${{ github.ref_name }}-windows-x64.zip"
+          Compress-Archive -Path package/* -DestinationPath "NetFreedom-$($env:TAG)-windows-x64.zip"
 
       # Free code signing for open source: apply at https://signpath.org, then add the SignPath
       # action here to sign package/netfreedom.exe BEFORE the checksums are computed.
 
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: release
+          path: |
+            NetFreedom-${{ github.ref_name }}-windows-x64.zip
+            package/netfreedom.exe
+            package/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # create the release
+      id-token: write       # sign the attestation
+      attestations: write   # store the attestation
+    steps:
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: release
+
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
         with:
           subject-path: |
             package/netfreedom.exe
             NetFreedom-${{ github.ref_name }}-windows-x64.zip
 
       - name: Publish
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            NetFreedom-${{ github.ref_name }}-windows-x64.zip
-            package/SHA256SUMS.txt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" --generate-notes \
+            "NetFreedom-${TAG}-windows-x64.zip" package/SHA256SUMS.txt

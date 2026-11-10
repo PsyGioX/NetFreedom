@@ -1,6 +1,6 @@
 # Сборка из исходников
 
-Гайд повторяет шаги `.github/workflows/release.yml` (job `windows`) и даёт такой же порядок для Linux:
+Гайд повторяет шаги `.github/workflows/release.yml` (jobs `build` и `package`) и даёт такой же порядок для Linux:
 тесты, release-сборка, сборка пакета из `dist/<платформа>`, контрольные суммы.
 
 Внешних зависимостей у проекта нет, кроме `libc` (Unix) и `windows-sys` (Windows). Они скачиваются
@@ -138,7 +138,7 @@ Compress-Archive -Path package/* -DestinationPath "NetFreedom-<версия>-win
 .\package\netfreedom.exe doctor
 ```
 
-Запуск (`start`, `tune`) требует прав администратора; движок `winws` и WinDivert лежат в `bin/`.
+Запуск (`start`, `tune`) требует прав администратора; драйвер WinDivert (`WinDivert.dll`, `WinDivert64.sys`) лежит в `bin/`; сам движок встроен в `netfreedom.exe`.
 
 ### Подпись и релиз
 

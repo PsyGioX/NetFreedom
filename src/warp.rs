@@ -179,8 +179,20 @@ impl Warp {
     /// Closes the tray application (Windows only).
     pub fn close_app(&self) {
         #[cfg(windows)]
-        crate::sys::kill_by_name("Cloudflare WARP.exe");
+        kill_app();
     }
+}
+
+/// The folders the Cloudflare WARP application is installed in, for the given Program Files roots.
+pub fn app_dirs(program_files: &[String]) -> Vec<String> {
+    program_files.iter().map(|pf| format!("{}\\Cloudflare\\Cloudflare WARP", pf.trim_end_matches(['\\', '/']))).collect()
+}
+
+/// Ends `Cloudflare WARP.exe`, but only a copy that runs from the WARP install folder in Program
+/// Files; a process that merely has that name is left alone (Windows only). Returns how many ended.
+#[cfg(windows)]
+pub fn kill_app() -> usize {
+    crate::sys::kill_by_name_in("Cloudflare WARP.exe", &app_dirs(&crate::util::program_files_dirs())).0
 }
 
 #[cfg(test)]

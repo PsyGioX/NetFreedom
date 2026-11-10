@@ -54,10 +54,6 @@ impl Layout {
         }
     }
 
-    pub fn winws_exe(&self) -> PathBuf {
-        PathBuf::from(&self.bin).join("winws.exe")
-    }
-
     /// Linux: `nfqws` from `bin/`, `bin/<zapret platform dir>/` or PATH.
     #[cfg(unix)]
     pub fn nfqws_exe(&self) -> Option<PathBuf> {
@@ -88,7 +84,7 @@ impl Layout {
             ("ipset-exclude-user.txt", "203.0.113.113/32\n"),
             ("list-general-user.txt", "# Never leave this file empty\ndomain.example.abc\n"),
             ("list-exclude-user.txt", "domain.example.abc\n"),
-            // Instagram/Meta and X/Twitter: ours, never overwritten by `lists update`. Created here
+            // Instagram/Meta and X/Twitter: ours. Created here
             // so that an older install that lacks the file still starts (a missing list file makes
             // the engine refuse to run).
             ("list-social.txt", include_str!("../assets/list-social.txt")),

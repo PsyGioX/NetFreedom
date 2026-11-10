@@ -34,8 +34,16 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::sync::Mutex;
 
+use crate::faketls::{self, TlsMod, DEFAULT_FAKE_TLS};
+use crate::hostlist::{self, HostList};
+use crate::http;
+use crate::ipset::IpSet;
 use crate::quic::is_quic_initial;
+use crate::quic_sni;
+use crate::tcp::{self, Split, Tcp, TcpRule};
+use crate::tls::{self, Hello, Pos};
 
 /// Opaque `WINDIVERT_ADDRESS` (80 bytes, 8-aligned). Copied from the original packet for fakes.
 #[repr(C)]
@@ -56,28 +64,228 @@ pub trait PacketIo {
 
 // ------------------------------------------------------------------------------ rules
 
+/// What a UDP payload is, in zapret's detection order (`desync.c`, UDP path).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum U7 {
+    Quic = 0,
+    Wireguard = 1,
+    Dht = 2,
+    Discord = 3,
+    Stun = 4,
+    Unknown = 5,
+}
+
+impl U7 {
+    fn from_name(s: &str) -> Option<U7> {
+        Some(match s {
+            "quic" => U7::Quic,
+            "wireguard" => U7::Wireguard,
+            "dht" => U7::Dht,
+            "discord" => U7::Discord,
+            "stun" => U7::Stun,
+            _ => return None,
+        })
+    }
+}
+
+/// `None` = nothing recognised (only rules with `--dpi-desync-any-protocol` act on those).
+fn classify_udp(p: &[u8]) -> Option<U7> {
+    if is_quic_initial(p) {
+        Some(U7::Quic)
+    } else if p.len() == 148 && p[0] == 1 {
+        Some(U7::Wireguard) // IsWireguardHandshakeInitiation
+    } else if p.len() >= 7 && p[0] == b'd' && p[1] == b'1' && p[p.len() - 1] == b'e' {
+        Some(U7::Dht)
+    } else if p.len() == 74 && p[..4] == [0, 1, 0, 70] && p[8..72].iter().all(|&b| b == 0) {
+        Some(U7::Discord) // IsDiscordIpDiscoveryRequest
+    } else if p.len() >= 20 && p[0] & 0xC0 == 0 && p[3] & 3 == 0 && p[4..8] == [0x21, 0x12, 0xA4, 0x42] && u16::from_be_bytes([p[2], p[3]]) as usize == p.len() - 20 {
+        Some(U7::Stun) // IsStunMessage
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct Rule {
     pub ports: Vec<(u16, u16)>,
     pub any_protocol: bool,
     pub repeats: u32,
-    pub fake_quic: Option<Vec<u8>>,
-    pub fake_unknown: Option<Vec<u8>>,
+    /// Fake payloads per protocol, in send order (index = [`U7`]). `finish` fills the empty ones
+    /// with zapret's built-in defaults.
+    pub fakes: [Vec<Vec<u8>>; 6],
+    /// `--filter-l7` as a bit set over [`U7`] (0 = any).
+    pub l7: u8,
+    pub ttl: Option<u8>,
+    pub ttl6: Option<u8>,
     /// `Some(n)`: desync only while the flow's packet counter (incremented first) is < n.
     pub cutoff: Option<u32>,
+    /// `--ipset` / `--ipset-exclude`: select by destination address.
+    pub ips: Option<IpSet>,
+    pub ips_exclude: Option<IpSet>,
+    /// `--hostlist` / `--hostlist-exclude`: matched against the SNI of a QUIC Initial.
+    pub include: Option<HostList>,
+    pub exclude: Option<HostList>,
 }
 
 impl Rule {
     fn matches_port(&self, p: u16) -> bool {
         self.ports.iter().any(|&(a, b)| (a..=b).contains(&p))
     }
+
+    fn matches_ip(&self, dst: &[u8; 16], v6: bool) -> bool {
+        self.ips.as_ref().map_or(true, |s| s.contains(dst, v6)) && !self.ips_exclude.as_ref().is_some_and(|s| s.contains(dst, v6))
+    }
+
+    fn matches_host(&self, host: Option<&str>) -> bool {
+        hostlist::applies(self.include.as_ref(), self.exclude.as_ref(), host)
+    }
+
+    fn matches_l7(&self, c: Option<U7>) -> bool {
+        self.l7 == 0 || c.is_some_and(|c| self.l7 & (1 << c as u8) != 0)
+    }
+
+    /// zapret's built-in fakes for protocols the rule gave none for (`dp_fake_defaults`).
+    fn fill_defaults(&mut self) {
+        for (i, f) in self.fakes.iter_mut().enumerate() {
+            if f.is_empty() {
+                let mut b = vec![0u8; if i == U7::Quic as usize { 620 } else { 64 }];
+                if i == U7::Quic as usize {
+                    b[0] = 0x40;
+                }
+                f.push(b);
+            }
+        }
+    }
 }
+
+/// Which application protocol a TCP rule is for (`--filter-l7`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum L7 {
+    Any,
+    Tls,
+    Http,
+}
+
+/// `--dpi-desync-autottl=delta[:min[-max]]` (zapret `parse_autottl`, `autottl_eval`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutoTtl {
+    pub delta: i8,
+    pub min: u8,
+    pub max: u8,
+}
+
+impl AutoTtl {
+    /// `Ok(None)` for "-" (disabled). Defaults are zapret's for the desync TTL: -1, 3, 20; a bare
+    /// number is a *negative* delta unless it starts with `+`.
+    pub fn parse(s: &str) -> Result<Option<AutoTtl>, String> {
+        if s == "-" {
+            return Ok(None);
+        }
+        let bad = || format!("bad --dpi-desync-autottl \"{s}\"");
+        let (neg, rest) = match s.as_bytes().first() {
+            Some(b'+') => (false, &s[1..]),
+            Some(b'-') => (true, &s[1..]),
+            _ => (true, s),
+        };
+        let (d, tail) = rest.split_once(':').map_or((rest, None), |(d, t)| (d, Some(t)));
+        let delta: u32 = d.parse().map_err(|_| bad())?;
+        let (mut min, mut max) = (3u32, 20u32);
+        if let Some(t) = tail {
+            let (m, x) = t.split_once('-').map_or((t, None), |(m, x)| (m, Some(x)));
+            min = m.parse().map_err(|_| bad())?;
+            if let Some(x) = x {
+                max = x.parse().map_err(|_| bad())?;
+                if (delta != 0 && max == 0) || max > 255 {
+                    return Err(bad());
+                }
+            }
+            if (delta != 0 && min == 0) || min > 255 || min > max {
+                return Err(bad());
+            }
+        }
+        if delta > 127 {
+            return Err(bad());
+        }
+        let delta = if neg { -(delta as i32) } else { delta as i32 } as i8;
+        Ok(Some(AutoTtl { delta, min: min as u8, max: max as u8 }))
+    }
+
+    /// The fake TTL for a server `hops` away, or `None` when it cannot be chosen sensibly.
+    pub fn eval(&self, hops: u8) -> Option<u8> {
+        let d = hops as i32 + self.delta as i32;
+        let fake = d.clamp(self.min as i32, self.max as i32) as u8;
+        if (self.delta < 0 && fake >= hops) || (self.delta >= 0 && fake < hops) {
+            None
+        } else {
+            Some(fake)
+        }
+    }
+}
+
+/// zapret `hop_count_guess`: assume the sender started from 64, 128 or 255.
+pub fn hop_count_guess(ttl: u8) -> u8 {
+    let orig = if ttl > 223 {
+        255
+    } else if ttl < 128 && ttl > 96 {
+        128
+    } else if ttl < 64 && ttl > 32 {
+        64
+    } else {
+        return 0;
+    };
+    orig - ttl
+}
+
+/// One TCP segment of a profile (`--filter-tcp ... --new`).
+#[derive(Debug)]
+pub struct TcpSpec {
+    pub ports: Vec<(u16, u16)>,
+    pub l7: L7,
+    pub include: Option<HostList>,
+    pub exclude: Option<HostList>,
+    pub ips: Option<IpSet>,
+    pub ips_exclude: Option<IpSet>,
+    pub rule: TcpRule,
+    /// `fake` is among the desync modes (the blob itself is chosen per packet).
+    pub fake: bool,
+    /// Fake ClientHellos in send order: blob already prepared (`sni=`, `rndsni`) + per-packet mod.
+    pub fake_tls: Vec<(Vec<u8>, TlsMod)>,
+    pub fake_unknown: Vec<Vec<u8>>,
+    /// A rule that can never desync anything (see `Seg::finish`): matched, then passed untouched.
+    pub inert: bool,
+    pub autottl: Option<AutoTtl>,
+    /// `syndata`: the payload put into the SYN. Only set for rules that can match a SYN, i.e. that
+    /// have no host list.
+    pub syndata: Option<Vec<u8>>,
+}
+
+impl TcpSpec {
+    /// Like `matches` but without looking at host lists: could this rule apply once the name is known?
+    fn could_match(&self, t: &Tcp, l7: L7) -> bool {
+        (self.l7 == L7::Any || self.l7 == l7)
+            && self.ports.iter().any(|&(a, b)| (a..=b).contains(&t.dport))
+            && self.ips.as_ref().map_or(true, |s| s.contains(&t.dst, t.v6))
+            && !self.ips_exclude.as_ref().is_some_and(|s| s.contains(&t.dst, t.v6))
+    }
+
+    fn matches(&self, t: &Tcp, l7: L7, host: Option<&str>) -> bool {
+        (self.l7 == L7::Any || self.l7 == l7)
+            && self.ports.iter().any(|&(a, b)| (a..=b).contains(&t.dport))
+            && hostlist::applies(self.include.as_ref(), self.exclude.as_ref(), host)
+            && self.ips.as_ref().map_or(true, |s| s.contains(&t.dst, t.v6))
+            && !self.ips_exclude.as_ref().is_some_and(|s| s.contains(&t.dst, t.v6))
+    }
+}
+
+/// zapret's built-in fake HTTP request (`fake_http_request_default`, MIT licence).
+const FAKE_HTTP: &[u8] = b"GET / HTTP/1.1\r\nHost: www.iana.org\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/109.0\r\nAccept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8\r\nAccept-Encoding: gzip, deflate, br\r\n\r\n";
 
 #[derive(Debug)]
 pub struct Plan {
-    /// WinDivert filter (`--wf-raw`).
+    /// WinDivert filter: the profile's `--wf-raw` (UDP) and/or one generated for the TCP rules.
     pub filter: String,
     pub rules: Vec<Rule>,
+    pub tcp: Vec<TcpSpec>,
 }
 
 fn parse_ports(s: &str) -> Result<Vec<(u16, u16)>, String> {
@@ -94,65 +302,420 @@ fn parse_ports(s: &str) -> Result<Vec<(u16, u16)>, String> {
     Ok(v)
 }
 
+fn port_clause(proto: &str, ports: &[(u16, u16)]) -> String {
+    let items: Vec<String> = ports
+        .iter()
+        .map(|&(a, b)| if a == b { format!("{proto}.DstPort=={a}") } else { format!("({proto}.DstPort>={a} and {proto}.DstPort<={b})") })
+        .collect();
+    format!("({})", items.join(" or "))
+}
+
+/// Options and state of the segment being parsed.
+struct Seg {
+    udp_ports: Option<Vec<(u16, u16)>>,
+    tcp_ports: Option<Vec<(u16, u16)>>,
+    modes: Vec<String>,
+    udp: Rule,
+    tcp: TcpRule,
+    l7_raw: Option<String>,
+    inc: Option<HostList>,
+    exc: Option<HostList>,
+    ips: Option<IpSet>,
+    ipx: Option<IpSet>,
+    fake_tls: Vec<(Vec<u8>, Option<TlsMod>)>,
+    tls_mod_last: Option<TlsMod>,
+    fake_unknown: Vec<Vec<u8>>,
+    autottl: Option<AutoTtl>,
+    fake_syndata: Option<Vec<u8>>,
+    udp_only: Option<String>,
+    tcp_only: Option<String>,
+}
+
+impl Seg {
+    fn new() -> Seg {
+        Seg {
+            udp_ports: None,
+            tcp_ports: None,
+            modes: Vec::new(),
+            udp: Rule { repeats: 1, ..Default::default() },
+            tcp: TcpRule { fake_repeats: 1, ..Default::default() },
+            l7_raw: None,
+            inc: None,
+            exc: None,
+            ips: None,
+            ipx: None,
+            fake_tls: Vec::new(),
+            tls_mod_last: None,
+            fake_unknown: Vec::new(),
+            autottl: None,
+            fake_syndata: None,
+            udp_only: None,
+            tcp_only: None,
+        }
+    }
+
+    fn finish(self, rules: &mut Vec<Rule>, tcp: &mut Vec<TcpSpec>) -> Result<(), String> {
+        match (self.udp_ports, self.tcp_ports) {
+            (Some(_), Some(_)) => Err("a rule with both --filter-udp and --filter-tcp".into()),
+            (None, None) => Err("a rule without --filter-udp / --filter-tcp".into()),
+            (Some(ports), None) => {
+                if let Some(o) = self.tcp_only {
+                    return Err(format!("unsupported option {o}"));
+                }
+                if self.modes != ["fake"] {
+                    return Err("a rule without --dpi-desync=fake".into());
+                }
+                let mut r = self.udp;
+                if let Some(raw) = &self.l7_raw {
+                    for n in raw.split(',') {
+                        let c = U7::from_name(n).ok_or_else(|| format!("unsupported option --filter-l7={raw}"))?;
+                        r.l7 |= 1 << c as u8;
+                    }
+                }
+                r.fill_defaults();
+                r.ports = ports;
+                if self.inc.is_some() && self.ips.is_some() {
+                    return Err("both --hostlist and --ipset in one rule".into());
+                }
+                r.include = self.inc;
+                r.exclude = self.exc;
+                r.ips = self.ips;
+                r.ips_exclude = self.ipx;
+                rules.push(r);
+                Ok(())
+            }
+            (None, Some(ports)) => {
+                if let Some(o) = self.udp_only {
+                    return Err(format!("unsupported option {o}"));
+                }
+                // winws creates a TCP flow record only on SYN and counts every captured packet,
+                // SYN included, so with --dpi-desync-cutoff=n1/n2 the first data packet is already
+                // past the cut-off (and a flow without SYN has no record: zapret then refuses to
+                // desync). Such a rule never changes a packet.
+                let inert = match self.udp.cutoff {
+                    Some(n) if n <= 2 => true,
+                    Some(_) => return Err("TCP --dpi-desync-cutoff above n2 needs flow tracking".into()),
+                    None => false,
+                };
+                if self.udp.any_protocol && !inert {
+                    return Err("--dpi-desync-any-protocol on TCP needs flow tracking".into());
+                }
+                let l7 = match self.l7_raw.as_deref() {
+                    None => L7::Any,
+                    Some("tls") => L7::Tls,
+                    Some("http") => L7::Http,
+                    Some(o) => return Err(format!("unsupported option --filter-l7={o}")),
+                };
+                let mut rule = self.tcp;
+                rule.fool.ttl = self.udp.ttl;
+                rule.fool.ttl6 = self.udp.ttl6;
+                // `syndata` acts on the SYN, where the host name is still unknown. winws then cannot
+                // match a rule that has a host list (its IP-to-name cache is off by default), so
+                // with a list the mode never fires and only the data-stage mode remains
+                let want_syn = self.modes.iter().any(|m| m == "syndata");
+                let syndata = (want_syn && self.inc.is_none()).then(|| self.fake_syndata.clone().unwrap_or_else(|| vec![0u8; 16]));
+                if self.l7_raw.is_some() && syndata.is_some() {
+                    return Err("syndata together with --filter-l7".into()); // no L7 is known at the SYN
+                }
+                let fake = self.modes.iter().any(|m| m == "fake");
+                let splits: Vec<Split> = self
+                    .modes
+                    .iter()
+                    .filter_map(|m| match m.as_str() {
+                        "multisplit" => Some(Split::Multisplit),
+                        "multidisorder" => Some(Split::Multidisorder),
+                        "fakedsplit" => Some(Split::FakedSplit),
+                        "fakeddisorder" => Some(Split::FakedDisorder),
+                        "hostfakesplit" => Some(Split::HostFakeSplit),
+                        _ => None,
+                    })
+                    .collect();
+                if self.modes.is_empty() || splits.len() > 1 {
+                    return Err("this --dpi-desync combination is not supported".into());
+                }
+                rule.split = splits.first().copied().unwrap_or(Split::None);
+                if rule.split != Split::None && rule.split != Split::HostFakeSplit && rule.positions.is_empty() {
+                    rule.positions.push(Pos::parse("2")?); // zapret's default split position
+                }
+                if rule.split == Split::HostFakeSplit && rule.seqovl > 0 {
+                    return Err("--dpi-desync-split-seqovl with hostfakesplit".into());
+                }
+                if rule.split == Split::None && (rule.seqovl > 0 || !rule.positions.is_empty()) {
+                    return Err("split options without multisplit / multidisorder".into());
+                }
+                if self.inc.is_some() && self.ips.is_some() {
+                    return Err("both --hostlist and --ipset in one rule".into());
+                }
+                // zapret: the built-in blob gets rnd,rndsni,dupsid unless a --dpi-desync-fake-tls-mod
+                // was given; blobs given with --dpi-desync-fake-tls get only the mod that was set
+                // when they were added (or the one that came right after the last of them)
+                let mut seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.subsec_nanos()) | 1;
+                let mut fake_tls = Vec::new();
+                if fake && l7 != L7::Http {
+                    if self.fake_tls.is_empty() {
+                        let m = self.tls_mod_last.unwrap_or_else(TlsMod::builtin_default);
+                        fake_tls.push((faketls::prepare(DEFAULT_FAKE_TLS, &m, &mut seed)?, m.runtime()));
+                    }
+                    for (blob, m) in self.fake_tls {
+                        let m = m.unwrap_or_default();
+                        fake_tls.push((faketls::prepare(&blob, &m, &mut seed)?, m.runtime()));
+                    }
+                }
+                let fake_unknown = if self.fake_unknown.is_empty() { vec![vec![0u8; 256]] } else { self.fake_unknown };
+                tcp.push(TcpSpec {
+                    ports,
+                    l7,
+                    include: self.inc,
+                    exclude: self.exc,
+                    ips: self.ips,
+                    ips_exclude: self.ipx,
+                    rule,
+                    fake,
+                    fake_tls,
+                    fake_unknown,
+                    inert,
+                    autottl: self.autottl,
+                    syndata,
+                });
+                Ok(())
+            }
+        }
+    }
+}
+
 impl Plan {
     /// Builds a plan from an expanded winws command line. Fails (with the reason) on anything the
     /// native engine does not reproduce exactly, so the caller can fall back to winws.
     pub fn from_args(args: &[String], read: &dyn Fn(&str) -> io::Result<Vec<u8>>) -> Result<Plan, String> {
-        let mut filter = None;
+        let mut raw = None;
         let mut rules = Vec::new();
-        let mut cur = Rule { repeats: 1, ..Default::default() };
-        let mut cur_has_filter = false;
-        let mut mode_fake = false;
+        let mut tcp = Vec::new();
+        let mut seg = Seg::new();
 
-        let finish = |cur: &mut Rule, has_filter: &mut bool, fake: &mut bool, rules: &mut Vec<Rule>| -> Result<(), String> {
-            if !*has_filter {
-                return Err("a rule without --filter-udp".into());
+        let blob = |p: &str| -> Result<Vec<u8>, String> {
+            let b = read(p).map_err(|e| format!("cannot read {p}: {e}"))?;
+            if b.is_empty() || b.len() > 1400 {
+                return Err(format!("{p}: fake payload must be 1..1400 bytes"));
             }
-            if !*fake {
-                return Err("a rule without --dpi-desync=fake".into());
-            }
-            rules.push(std::mem::replace(cur, Rule { repeats: 1, ..Default::default() }));
-            *has_filter = false;
-            *fake = false;
-            Ok(())
+            Ok(b)
+        };
+        let text = |p: &str| -> Result<String, String> {
+            let b = read(p).map_err(|e| format!("cannot read {p}: {e}"))?;
+            Ok(String::from_utf8_lossy(&b).into_owned())
         };
 
         for a in args {
             if a == "--new" {
-                finish(&mut cur, &mut cur_has_filter, &mut mode_fake, &mut rules)?;
+                std::mem::replace(&mut seg, Seg::new()).finish(&mut rules, &mut tcp)?;
                 continue;
             }
             let (k, v) = a.split_once('=').unwrap_or((a.as_str(), ""));
-            let load = |p: &str| -> Result<Vec<u8>, String> {
-                let b = read(p).map_err(|e| format!("cannot read {p}: {e}"))?;
-                if b.is_empty() || b.len() > 1400 {
-                    return Err(format!("{p}: fake payload must be 1..1400 bytes"));
-                }
-                Ok(b)
+            let mut tcp_only = || {
+                seg.tcp_only.get_or_insert_with(|| a.clone());
             };
             match k {
-                "--wf-raw" => filter = Some(v.to_owned()),
-                "--filter-udp" => {
-                    cur.ports = parse_ports(v)?;
-                    cur_has_filter = true;
+                "--wf-raw" => raw = Some(v.to_owned()),
+                "--wf-tcp" | "--wf-udp" => {} // capture is derived from the rules themselves
+                "--filter-udp" => seg.udp_ports = Some(parse_ports(v)?),
+                "--filter-tcp" => seg.tcp_ports = Some(parse_ports(v)?),
+                "--dpi-desync" => {
+                    for m in v.split(',') {
+                        if !["fake", "multisplit", "multidisorder", "fakedsplit", "fakeddisorder", "hostfakesplit", "syndata"].contains(&m) {
+                            return Err(format!("unsupported option {a}"));
+                        }
+                        seg.modes.push(m.to_owned());
+                    }
                 }
-                "--dpi-desync" if v == "fake" => mode_fake = true,
                 "--dpi-desync-repeats" => {
-                    cur.repeats = v.parse().ok().filter(|n| (1..=64).contains(n)).ok_or("bad --dpi-desync-repeats")?
+                    let n = v.parse().ok().filter(|n| (1..=64).contains(n)).ok_or("bad --dpi-desync-repeats")?;
+                    seg.udp.repeats = n;
+                    seg.tcp.fake_repeats = n;
                 }
-                "--dpi-desync-any-protocol" => cur.any_protocol = v == "1",
-                "--dpi-desync-fake-quic" => cur.fake_quic = Some(load(v)?),
-                "--dpi-desync-fake-unknown-udp" => cur.fake_unknown = Some(load(v)?),
+                // ---- UDP only
+                "--dpi-desync-any-protocol" => seg.udp.any_protocol = v == "1",
+                "--dpi-desync-fake-quic" | "--dpi-desync-fake-wireguard" | "--dpi-desync-fake-dht" | "--dpi-desync-fake-discord" | "--dpi-desync-fake-stun" | "--dpi-desync-fake-unknown-udp" => {
+                    let c = match k {
+                        "--dpi-desync-fake-quic" => U7::Quic,
+                        "--dpi-desync-fake-wireguard" => U7::Wireguard,
+                        "--dpi-desync-fake-dht" => U7::Dht,
+                        "--dpi-desync-fake-discord" => U7::Discord,
+                        "--dpi-desync-fake-stun" => U7::Stun,
+                        _ => U7::Unknown,
+                    };
+                    seg.udp.fakes[c as usize].push(blob(v)?);
+                    seg.udp_only.get_or_insert_with(|| a.clone());
+                }
                 "--dpi-desync-cutoff" => {
                     let n = v.strip_prefix('n').and_then(|n| n.parse().ok()).filter(|n| *n >= 1);
-                    cur.cutoff = Some(n.ok_or("only --dpi-desync-cutoff=nN is supported")?);
+                    seg.udp.cutoff = Some(n.ok_or("only --dpi-desync-cutoff=nN is supported")?);
+                }
+                // ---- TCP only
+                "--filter-l7" => seg.l7_raw = Some(v.to_owned()),
+                "--hostlist" | "--hostlist-exclude" => {
+                    let l = HostList::parse(&text(v)?);
+                    let slot = if k == "--hostlist" { &mut seg.inc } else { &mut seg.exc };
+                    slot.get_or_insert_with(HostList::default).merge(l);
+                }
+                "--hostlist-domains" => {
+                    let l = HostList::parse(&v.replace(',', "\n"));
+                    seg.inc.get_or_insert_with(HostList::default).merge(l);
+                }
+                "--ipset" | "--ipset-exclude" => {
+                    let l = IpSet::parse(&text(v)?);
+                    let slot = if k == "--ipset" { &mut seg.ips } else { &mut seg.ipx };
+                    slot.get_or_insert_with(IpSet::default).merge(l);
+                }
+                "--dpi-desync-split-pos" => {
+                    seg.tcp.positions = v.split(',').map(Pos::parse).collect::<Result<_, _>>()?;
+                    tcp_only();
+                }
+                "--dpi-desync-split-seqovl" => {
+                    seg.tcp.seqovl = v.parse().ok().filter(|n| *n < 4096).ok_or("bad --dpi-desync-split-seqovl")?;
+                    tcp_only();
+                }
+                "--dpi-desync-split-seqovl-pattern" => {
+                    seg.tcp.seqovl_pattern = blob(v)?;
+                    tcp_only();
+                }
+                "--dpi-desync-fakedsplit-pattern" => {
+                    seg.tcp.fs_pattern = match v.strip_prefix("0x") {
+                        Some(h) if !h.is_empty() && h.len() % 2 == 0 && h.chars().all(|c| c.is_ascii_hexdigit()) => {
+                            (0..h.len()).step_by(2).map(|i| u8::from_str_radix(&h[i..i + 2], 16).unwrap()).collect()
+                        }
+                        Some(_) => return Err(format!("bad hex pattern in {a}")),
+                        None => blob(v)?,
+                    };
+                    tcp_only();
+                }
+                "--dpi-desync-fakedsplit-mod" => {
+                    for item in v.split(',') {
+                        match item.strip_prefix("altorder=") {
+                            Some(n) => seg.tcp.fs_order = n.parse().ok().filter(|n| *n <= 3).ok_or("unsupported altorder")?,
+                            None if item == "none" => {}
+                            None => return Err(format!("unsupported option {a}")),
+                        }
+                    }
+                    tcp_only();
+                }
+                "--dpi-desync-hostfakesplit-mod" => {
+                    for item in v.split(',') {
+                        if let Some(n) = item.strip_prefix("altorder=") {
+                            seg.tcp.hfs_order = n.parse().ok().filter(|n| *n <= 1).ok_or("bad altorder")?;
+                        } else if let Some(h) = item.strip_prefix("host=") {
+                            if h.is_empty() || !h.is_ascii() || h.len() > 200 {
+                                return Err(format!("bad host in {a}"));
+                            }
+                            seg.tcp.hfs_host = Some(h.to_owned());
+                        } else if item != "none" {
+                            return Err(format!("unsupported option {a}"));
+                        }
+                    }
+                    tcp_only();
+                }
+                "--dpi-desync-fooling" => {
+                    for f in v.split(',') {
+                        match f {
+                            "ts" => seg.tcp.fool.ts = true,
+                            "badseq" => seg.tcp.fool.badseq = true,
+                            "md5sig" => seg.tcp.fool.md5sig = true,
+                            _ => return Err(format!("unsupported fooling \"{f}\"")),
+                        }
+                    }
+                    tcp_only();
+                }
+                "--dpi-desync-badseq-increment" => {
+                    seg.tcp.fool.badseq_inc = Some(v.parse().map_err(|_| "bad --dpi-desync-badseq-increment")?);
+                    tcp_only();
+                }
+                "--dpi-desync-fake-unknown" => {
+                    seg.fake_unknown.push(blob(v)?);
+                    tcp_only();
+                }
+                "--dpi-desync-fake-tls" => {
+                    let b = blob(v)?;
+                    let m = seg.tls_mod_last.clone();
+                    seg.fake_tls.push((b, m));
+                    tcp_only();
+                }
+                "--dpi-desync-fake-tls-mod" => {
+                    let m = TlsMod::parse(v)?;
+                    if let Some(last) = seg.fake_tls.last_mut() {
+                        last.1 = Some(m.clone());
+                    }
+                    seg.tls_mod_last = Some(m);
+                    tcp_only();
+                }
+                "--dpi-desync-autottl" => {
+                    seg.autottl = AutoTtl::parse(v)?;
+                    tcp_only();
+                }
+                "--dpi-desync-fake-syndata" => {
+                    seg.fake_syndata = Some(blob(v)?);
+                    tcp_only();
+                }
+                "--dpi-desync-ttl" => seg.udp.ttl = Some(v.parse().ok().filter(|n| *n >= 1).ok_or("bad --dpi-desync-ttl")?),
+                "--dpi-desync-ttl6" => seg.udp.ttl6 = Some(v.parse().ok().filter(|n| *n >= 1).ok_or("bad --dpi-desync-ttl6")?),
+                "--ip-id" if v == "zero" => {
+                    seg.tcp.ip_id_zero = true;
+                    tcp_only();
                 }
                 _ => return Err(format!("unsupported option {a}")),
             }
         }
-        finish(&mut cur, &mut cur_has_filter, &mut mode_fake, &mut rules)?;
-        let filter = filter.ok_or("the profile has no --wf-raw filter (port-based capture)")?;
-        Ok(Plan { filter, rules })
+        seg.finish(&mut rules, &mut tcp)?;
+
+        let mut clauses: Vec<String> = Vec::new();
+        for s in tcp.iter().filter(|s| !s.inert) {
+            if s.syndata.is_some() {
+                clauses.push(format!("{} and tcp.Syn and tcp.Ack==0 and tcp.PayloadLength==0", port_clause("tcp", &s.ports)));
+            }
+            if s.l7 != L7::Http {
+                // A host-list rule can only be chosen once the SNI has been read, and a modern
+                // browser's ClientHello is cut by the OS into two segments with the SNI possibly in
+                // the second one (zapret collects them: `reasm`). The second segment starts with
+                // arbitrary bytes, so every data segment on these ports has to be seen; a rule
+                // without a host list only needs the first segment, recognised by its header.
+                let shape = if s.include.is_some() { "tcp.PayloadLength>0" } else { "tcp.PayloadLength>=6 and tcp.Payload[0]==0x16 and tcp.Payload[5]==0x01" };
+                clauses.push(format!("{} and {shape}", port_clause("tcp", &s.ports)));
+            }
+            let http_ports: Vec<(u16, u16)> = if s.l7 == L7::Http { s.ports.clone() } else { s.ports.iter().copied().filter(|&(a, b)| (a..=b).contains(&80)).map(|_| (80, 80)).collect() };
+            if !http_ports.is_empty() && s.l7 != L7::Tls {
+                clauses.push(format!("{} and tcp.PayloadLength>=4 and tcp.Payload[0]>=0x41 and tcp.Payload[0]<=0x5A", port_clause("tcp", &http_ports)));
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        clauses.retain(|c| seen.insert(c.clone()));
+        let mut tcp_filter = (!clauses.is_empty()).then(|| format!("not impostor and not loopback and outbound and tcp and ({})", clauses.join(" or ")));
+        // autottl learns the server's distance from its SYN-ACK
+        let mut synack_ports: Vec<(u16, u16)> = tcp.iter().filter(|s| !s.inert && s.autottl.is_some()).flat_map(|s| s.ports.iter().copied()).collect();
+        synack_ports.sort_unstable();
+        synack_ports.dedup();
+        if let (Some(f), false) = (&tcp_filter, synack_ports.is_empty()) {
+            tcp_filter = Some(format!("({f}) or (not impostor and not loopback and inbound and tcp and tcp.Syn and tcp.Ack and {})", port_clause("tcp", &synack_ports).replace("DstPort", "SrcPort")));
+        }
+        let udp_filter = if rules.is_empty() {
+            None
+        } else if let Some(r) = raw {
+            Some(r)
+        } else {
+            // a rule with a host list can only ever act on a QUIC Initial (long header, 256+ bytes);
+            // the others look at every datagram on their ports
+            let mut uc: Vec<String> = Vec::new();
+            for r in &rules {
+                let shape = if r.include.is_some() { "udp.PayloadLength>=256 and udp.Payload[0]>=0xC0" } else { "udp.PayloadLength>0" };
+                uc.push(format!("{} and {shape}", port_clause("udp", &r.ports)));
+            }
+            let mut seen = std::collections::HashSet::new();
+            uc.retain(|c| seen.insert(c.clone()));
+            Some(format!("not impostor and not loopback and outbound and udp and ({})", uc.join(" or ")))
+        };
+        let filter = match (udp_filter, tcp_filter) {
+            (Some(u), None) => u,
+            (None, Some(t)) => t,
+            (Some(u), Some(t)) => format!("({u}) or ({t})"),
+            (None, None) => return Err("the profile has no rules".into()),
+        };
+        Ok(Plan { filter, rules, tcp })
     }
 }
 
@@ -206,7 +769,7 @@ fn parse_udp(p: &[u8]) -> Option<Udp> {
     })
 }
 
-fn csum_add(mut sum: u32, data: &[u8]) -> u32 {
+pub(crate) fn csum_add(mut sum: u32, data: &[u8]) -> u32 {
     #[allow(unknown_lints, clippy::manual_as_chunks)]
     let mut it = data.chunks_exact(2);
     for w in &mut it {
@@ -218,7 +781,7 @@ fn csum_add(mut sum: u32, data: &[u8]) -> u32 {
     sum
 }
 
-fn csum_fold(mut sum: u32) -> u16 {
+pub(crate) fn csum_fold(mut sum: u32) -> u16 {
     while sum >> 16 != 0 {
         sum = (sum & 0xFFFF) + (sum >> 16);
     }
@@ -227,14 +790,14 @@ fn csum_fold(mut sum: u32) -> u16 {
 
 /// Builds a complete IP+UDP packet carrying `payload`, modelled on `orig`.
 /// Returns the length written into `out`.
-fn build_fake(orig: &[u8], u: &Udp, ip_id: u16, payload: &[u8], out: &mut Vec<u8>) {
+fn build_fake(orig: &[u8], u: &Udp, ip_id: u16, ttl: u8, payload: &[u8], out: &mut Vec<u8>) {
     out.clear();
     let udp_len = 8 + payload.len();
     if u.v6 {
         out.extend_from_slice(&orig[..4]); // version, traffic class, flow label
         out.extend_from_slice(&(udp_len as u16).to_be_bytes());
         out.push(17);
-        out.push(u.ttl);
+        out.push(ttl);
         out.extend_from_slice(&u.src);
         out.extend_from_slice(&u.dst);
     } else {
@@ -244,7 +807,7 @@ fn build_fake(orig: &[u8], u: &Udp, ip_id: u16, payload: &[u8], out: &mut Vec<u8
         out.extend_from_slice(&ip_id.to_be_bytes());
         out.push(orig[6] & 0x40); // keep DF, clear MF / offset
         out.push(0);
-        out.push(u.ttl);
+        out.push(ttl);
         out.push(17);
         out.extend_from_slice(&[0, 0]);
         out.extend_from_slice(&u.src[..4]);
@@ -287,6 +850,12 @@ struct FlowKey {
     dport: u16,
 }
 
+impl FlowKey {
+    fn of_tcp(t: &Tcp) -> FlowKey {
+        FlowKey { v6: t.v6, src: t.src, dst: t.dst, sport: t.sport, dport: t.dport }
+    }
+}
+
 struct Flow {
     packets: u32,
     last_ms: u64,
@@ -299,17 +868,80 @@ pub struct Stats {
     pub desynced: u64,
     pub fakes_sent: u64,
     pub passed: u64,
+    /// ClientHellos (TCP) and QUIC Initials that arrived in several pieces and were handled as one.
+    pub reassembled: u64,
 }
 
 const FLOW_TTL_MS: u64 = 60_000;
+/// zapret `IPCACHE_LIFETIME`: 7200 s.
+const IPCACHE_LIFETIME_MS: u64 = 7_200_000;
 const MAX_FLOWS: usize = 4096;
+/// The flow table is cleaned at most this often (a full scan per new flow made a busy UDP
+/// workload quadratic).
+const PURGE_EVERY_MS: u64 = 5_000;
 /// A repeated Initial within this window belongs to the same ClientHello (fragmentation) or is a
 /// quick retransmit: the DPI state is already primed, so no new fakes.
 const QUIC_REFAKE_MS: u64 = 1000;
 
+/// zapret `RECONSTRUCT_MAX_SIZE`: a ClientHello larger than this is not collected.
+const REASM_MAX_BYTES: usize = 16 * 1024 + 5;
+/// The OS sends the segments of one write back to back, so the rest of a ClientHello follows
+/// within microseconds; anything slower is not the case this is meant for.
+const REASM_TIMEOUT_MS: u64 = 250;
+const REASM_MAX_SEGMENTS: usize = 16;
+const MAX_HOLDS: usize = 256;
+/// A QUIC ClientHello needs two Initial datagrams today, three at most.
+const QHOLD_MAX_DGRAMS: usize = 4;
+const QHOLD_TIMEOUT_MS: u64 = 150;
+
+/// A captured packet kept back until the rest of its message has been seen.
+struct Held {
+    pkt: Vec<u8>,
+    addr: Addr,
+}
+
+/// A TLS ClientHello that the OS cut into several TCP segments, collected until it is whole. The
+/// SNI (and so the choice of rule) may be in a later segment, and the split positions are
+/// relative to the whole message, exactly as in zapret's `reasm`.
+struct TcpReasm {
+    held: Vec<Held>,
+    /// Stream bytes of the held segments, contiguous from `seq0`.
+    data: Vec<u8>,
+    /// Size of the TLS record announced by its header.
+    total: usize,
+    seq0: u32,
+    started: u64,
+    /// Largest payload among the held segments: the size the OS cuts at.
+    mss: usize,
+    last_flags: u8,
+}
+
+/// The first QUIC Initial(s) of a flow whose ClientHello continues in the next datagram.
+struct QHold {
+    held: Vec<Held>,
+    crypto: quic_sni::Crypto,
+    started: u64,
+}
+
+/// Where the server name of a QUIC Initial comes from.
+enum HostArg {
+    /// Read it out of the datagram itself.
+    Compute,
+    /// Already known from the datagrams that were collected (`None`: the hello has no name).
+    Given(Option<String>),
+}
+
 pub struct Engine {
     rules: Vec<Rule>,
+    tcp: Vec<TcpSpec>,
+    /// Server IPv4 -> (hops, last seen ms), learned from inbound SYN-ACKs, for `autottl`.
+    hops: HashMap<[u8; 4], (u8, u64)>,
     flows: HashMap<FlowKey, Flow>,
+    next_purge: u64,
+    reasm: HashMap<FlowKey, TcpReasm>,
+    qhold: HashMap<FlowKey, QHold>,
+    /// Some UDP rule selects by host name, so a QUIC Initial has to be read before it is judged.
+    host_rules: bool,
     scratch: Vec<u8>,
     rng: u32,
     pub stats: Stats,
@@ -317,7 +949,27 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(rules: Vec<Rule>, seed: u32) -> Self {
-        Self { rules, flows: HashMap::new(), scratch: Vec::with_capacity(2048), rng: seed | 1, stats: Stats::default() }
+        let host_rules = rules.iter().any(|r| r.include.is_some() || r.exclude.is_some());
+        Self {
+            rules,
+            tcp: Vec::new(),
+            hops: HashMap::new(),
+            flows: HashMap::new(),
+            next_purge: 0,
+            reasm: HashMap::new(),
+            qhold: HashMap::new(),
+            host_rules,
+            scratch: Vec::with_capacity(2048),
+            rng: seed | 1,
+            stats: Stats::default(),
+        }
+    }
+
+    /// Adds the TCP rules. TCP needs no per-flow state except for one case: a ClientHello that
+    /// the OS cut into several segments is collected first (see [`TcpReasm`]).
+    pub fn with_tcp(mut self, tcp: Vec<TcpSpec>) -> Self {
+        self.tcp = tcp;
+        self
     }
 
     fn rand16(&mut self) -> u16 {
@@ -330,48 +982,387 @@ impl Engine {
     }
 
     fn purge(&mut self, now: u64) {
-        if self.flows.len() >= MAX_FLOWS / 2 {
-            self.flows.retain(|_, f| now.saturating_sub(f.last_ms) < FLOW_TTL_MS);
-            if self.flows.len() >= MAX_FLOWS {
-                self.flows.clear(); // flows are short-lived; losing the counters is harmless
+        if now < self.next_purge && self.flows.len() < MAX_FLOWS {
+            return;
+        }
+        self.next_purge = now.saturating_add(PURGE_EVERY_MS);
+        self.flows.retain(|_, f| now.saturating_sub(f.last_ms) < FLOW_TTL_MS);
+        if self.flows.len() >= MAX_FLOWS {
+            self.flows.clear(); // flows are short-lived; losing the counters is harmless
+        }
+    }
+
+    fn release(&mut self, held: Vec<Held>, io: &mut dyn PacketIo) {
+        for h in held {
+            io.send(&h.pkt, &h.addr);
+        }
+    }
+
+    /// Lets go of everything that has been waiting too long. Runs before every packet and, on
+    /// Windows, from a timer thread, so a hello whose rest never comes is delayed, not lost.
+    fn expire(&mut self, now: u64, io: &mut dyn PacketIo) {
+        if self.reasm.is_empty() && self.qhold.is_empty() {
+            return;
+        }
+        let stale: Vec<FlowKey> = self.reasm.iter().filter(|(_, r)| now.saturating_sub(r.started) >= REASM_TIMEOUT_MS).map(|(k, _)| *k).collect();
+        for k in stale {
+            if let Some(r) = self.reasm.remove(&k) {
+                self.stats.passed += 1;
+                self.release(r.held, io);
             }
+        }
+        let stale: Vec<FlowKey> = self.qhold.iter().filter(|(_, h)| now.saturating_sub(h.started) >= QHOLD_TIMEOUT_MS).map(|(k, _)| *k).collect();
+        for k in stale {
+            self.quic_release(k, now, io);
+        }
+    }
+
+    /// Public entry for the timer thread.
+    pub fn flush_expired(&mut self, now: u64, io: &mut dyn PacketIo) {
+        self.expire(now, io);
+    }
+
+    /// Sends everything that is being held, unchanged (the engine is stopping).
+    pub fn flush_all(&mut self, io: &mut dyn PacketIo) {
+        let tcp: Vec<TcpReasm> = self.reasm.drain().map(|(_, r)| r).collect();
+        for r in tcp {
+            self.release(r.held, io);
+        }
+        let udp: Vec<QHold> = self.qhold.drain().map(|(_, h)| h).collect();
+        for h in udp {
+            self.release(h.held, io);
         }
     }
 
     /// Processes one captured outbound packet: fakes first (if any), then the original, unmodified.
     pub fn handle(&mut self, pkt: &[u8], addr: &Addr, now_ms: u64, io: &mut dyn PacketIo) {
         self.stats.packets += 1;
-        let fakes = self.plan_fakes(pkt, now_ms);
-        if let Some((rule_idx, quic, repeats, ip_id)) = fakes {
+        self.expire(now_ms, io);
+        if let Some(t) = tcp::parse_tcp(pkt) {
+            if t.flags & 0x12 == 0x02 && self.handle_syn(pkt, &t, addr, io) {
+                return;
+            }
+            if t.flags & 0x12 == 0x12 && t.payload_off == t.end {
+                self.note_synack(&t, now_ms);
+                io.send(pkt, addr);
+                return;
+            }
+            if t.payload_off < t.end && !self.reasm.is_empty() && self.reasm_feed(pkt, &t, addr, now_ms, io) {
+                return;
+            }
+            if !self.handle_tcp(pkt, &t, addr, now_ms, io) {
+                self.stats.passed += 1;
+                io.send(pkt, addr);
+            }
+            return;
+        }
+        if self.host_rules && self.quic_step(pkt, addr, now_ms, io) {
+            return;
+        }
+        self.udp_desync(pkt, addr, now_ms, HostArg::Compute, io);
+    }
+
+    /// UDP: fakes (if a rule wants them), then the datagram itself.
+    fn udp_desync(&mut self, pkt: &[u8], addr: &Addr, now: u64, host: HostArg, io: &mut dyn PacketIo) {
+        let fakes = self.plan_fakes(pkt, now, host);
+        if let Some((rule_idx, class, ip_id)) = fakes {
             let u = parse_udp(pkt).expect("parsed above");
-            let blob = {
-                let r = &self.rules[rule_idx];
-                if quic { r.fake_quic.as_deref() } else { r.fake_unknown.as_deref() }
-            };
-            if let Some(blob) = blob {
-                let mut buf = std::mem::take(&mut self.scratch);
-                build_fake(pkt, &u, ip_id, blob, &mut buf);
+            let r = &self.rules[rule_idx];
+            let ttl = if u.v6 { r.ttl6 } else { r.ttl }.unwrap_or(u.ttl);
+            let repeats = r.repeats;
+            let mut buf = std::mem::take(&mut self.scratch);
+            let mut id = ip_id;
+            let mut sent = 0u64;
+            for blob in &r.fakes[class as usize] {
+                build_fake(pkt, &u, id, ttl, blob, &mut buf);
                 let mut a = *addr;
                 io.finalize(&mut buf, &mut a);
                 for _ in 0..repeats {
                     io.send(&buf, &a);
                 }
-                self.stats.fakes_sent += repeats as u64;
-                self.stats.desynced += 1;
-                self.scratch = buf;
-            } else {
-                self.stats.passed += 1; // winws would use a built-in blob here: not reproduced
+                sent += repeats as u64;
+                id = id.wrapping_add(1);
             }
+            self.stats.fakes_sent += sent;
+            self.stats.desynced += 1;
+            self.scratch = buf;
         } else {
             self.stats.passed += 1;
         }
         io.send(pkt, addr);
     }
 
+    /// QUIC: a ClientHello that does not fit into one Initial continues in the next datagram, and
+    /// the server name (the thing a host list is matched against) may be in that one. The first
+    /// datagram is kept back until the hello is whole (or [`QHOLD_TIMEOUT_MS`] passed), then the
+    /// rule is chosen on the full name, the fakes go out and the datagrams follow in their order.
+    /// Returns `true` when the packet was taken over.
+    fn quic_step(&mut self, pkt: &[u8], addr: &Addr, now: u64, io: &mut dyn PacketIo) -> bool {
+        let Some(u) = parse_udp(pkt) else { return false };
+        let Some(payload) = pkt.get(u.payload_off..) else { return false };
+        let key = FlowKey { v6: u.v6, src: u.src, dst: u.dst, sport: u.sport, dport: u.dport };
+        if self.qhold.contains_key(&key) {
+            let more = quic_sni::decrypt_initial(payload);
+            let (done, ok) = match (self.qhold.get_mut(&key), more) {
+                (Some(h), Some(frames)) => {
+                    if h.crypto.feed(&frames) {
+                        h.held.push(Held { pkt: pkt.to_vec(), addr: *addr });
+                        (h.crypto.complete() || h.held.len() >= QHOLD_MAX_DGRAMS, true)
+                    } else {
+                        (true, false)
+                    }
+                }
+                _ => (true, false),
+            };
+            if done {
+                self.quic_release(key, now, io);
+            }
+            return ok; // not part of the hello: released above, this one is handled on its own
+        }
+        if self.qhold.len() >= MAX_HOLDS || classify_udp(payload) != Some(U7::Quic) {
+            return false;
+        }
+        if !self.rules.iter().any(|r| r.matches_port(u.dport) && r.matches_ip(&u.dst, u.v6) && r.matches_l7(Some(U7::Quic))) {
+            return false;
+        }
+        let Some(frames) = quic_sni::decrypt_initial(payload) else { return false };
+        let mut c = quic_sni::Crypto::default();
+        if !c.feed(&frames) || !c.started() || c.complete() || c.host().is_some() {
+            return false; // no head here, whole, or the name is already here: nothing to wait for
+        }
+        self.qhold.insert(key, QHold { held: vec![Held { pkt: pkt.to_vec(), addr: *addr }], crypto: c, started: now });
+        true
+    }
+
+    fn quic_release(&mut self, key: FlowKey, now: u64, io: &mut dyn PacketIo) {
+        let Some(h) = self.qhold.remove(&key) else { return };
+        if h.held.len() > 1 {
+            self.stats.reassembled += 1;
+        }
+        let host = h.crypto.host();
+        let mut it = h.held.into_iter();
+        if let Some(first) = it.next() {
+            self.udp_desync(&first.pkt, &first.addr, now, HostArg::Given(host), io);
+        }
+        for x in it {
+            io.send(&x.pkt, &x.addr);
+        }
+    }
+
+    /// Desynchronises one captured TCP data segment. Returns `false` when the packet is not
+    /// ours to change (the caller then forwards it untouched).
+    /// `syndata`: the SYN is replaced by one carrying junk (the server ignores data in a SYN
+    /// that is not Fast Open). The first rule whose port and address filters match decides, as in
+    /// zapret; host lists cannot match yet because the name is unknown at this point.
+    fn handle_syn(&mut self, pkt: &[u8], t: &Tcp, addr: &Addr, io: &mut dyn PacketIo) -> bool {
+        if t.payload_off != t.end {
+            return false; // zapret: a SYN that already carries data is left alone
+        }
+        let Some(spec) = self.tcp.iter().find(|s| s.matches(t, L7::Any, None)) else { return false };
+        let Some(data) = &spec.syndata else { return false };
+        let opts = &pkt[t.ip_len + 20..t.payload_off];
+        let mut i = 0;
+        while i < opts.len() {
+            match opts[i] {
+                0 => break,
+                1 => i += 1,
+                k => {
+                    let l = *opts.get(i + 1).unwrap_or(&0) as usize;
+                    // TCP Fast Open (RFC 7413, or the old experimental form): never break it
+                    if k == 34 || (k == 254 && l >= 4 && opts.get(i + 2..i + 4) == Some(&[0xF9, 0x89])) {
+                        return false;
+                    }
+                    if l < 2 {
+                        break;
+                    }
+                    i += l;
+                }
+            }
+        }
+        let id = if t.v6 { 0 } else { u16::from_be_bytes([pkt[4], pkt[5]]) };
+        let mut out = Vec::new();
+        tcp::build(pkt, t, t.seq, data, tcp::Fool::default(), if spec.rule.ip_id_zero { 0 } else { id }, &mut out);
+        let mut a = *addr;
+        io.finalize(&mut out, &mut a);
+        for _ in 0..spec.rule.fake_repeats.max(1) {
+            io.send(&out, &a);
+        }
+        self.stats.desynced += 1;
+        true
+    }
+
+    /// An inbound SYN-ACK tells how far the server is (its TTL); only kept when a rule uses autottl.
+    fn note_synack(&mut self, t: &Tcp, now: u64) {
+        if t.v6 || !self.tcp.iter().any(|s| s.autottl.is_some()) {
+            return;
+        }
+        let h = hop_count_guess(t.ttl);
+        if h == 0 {
+            return;
+        }
+        if self.hops.len() >= 4096 {
+            self.hops.retain(|_, v| now.saturating_sub(v.1) < IPCACHE_LIFETIME_MS);
+            if self.hops.len() >= 4096 {
+                self.hops.clear();
+            }
+        }
+        self.hops.insert([t.src[0], t.src[1], t.src[2], t.src[3]], (h, now));
+    }
+
+    /// What TCP rule `idx` does to `payload`: (packets to send, whether the original packet(s)
+    /// must still follow untouched, number of fake packets).
+    #[allow(clippy::too_many_arguments)]
+    fn tcp_plan(&mut self, idx: usize, pkt: &[u8], t: &Tcp, payload: &[u8], hello: Option<&Hello>, l7: L7, now: u64) -> (Vec<Vec<u8>>, bool, u64) {
+        let spec = &self.tcp[idx];
+        let fakes: Vec<Vec<u8>> = match (spec.fake, l7) {
+            (false, _) => Vec::new(),
+            (true, L7::Http) => vec![FAKE_HTTP.to_vec()],
+            (true, _) => spec.fake_tls.iter().map(|(b, m)| faketls::apply(b, m, payload, &mut self.rng)).collect(),
+        };
+        let ttl_fake = spec.autottl.filter(|_| !t.v6).and_then(|a| {
+            let (h, seen) = *self.hops.get(&[t.dst[0], t.dst[1], t.dst[2], t.dst[3]])?;
+            (now.saturating_sub(seen) < IPCACHE_LIFETIME_MS).then_some(h).and_then(|h| a.eval(h))
+        });
+        let orig_id = if t.v6 { 0 } else { u16::from_be_bytes([pkt[4], pkt[5]]) };
+        let (out, keep) = tcp::desync_payload(&spec.rule, &fakes, ttl_fake, pkt, t, payload, hello, orig_id);
+        let nfakes = fakes.len() as u64 * spec.rule.fake_repeats.max(1) as u64;
+        (out, keep, nfakes)
+    }
+
+    fn handle_tcp(&mut self, pkt: &[u8], t: &Tcp, addr: &Addr, now: u64, io: &mut dyn PacketIo) -> bool {
+        if self.tcp.is_empty() {
+            return false;
+        }
+        let payload = &pkt[t.payload_off..t.end];
+        let (l7, hello) = if tls::is_client_hello(payload) {
+            (L7::Tls, tls::parse(payload))
+        } else if http::is_request(payload) {
+            (L7::Http, http::parse(payload))
+        } else {
+            return false;
+        };
+        let host = hello.as_ref().and_then(|h| tls::sni(payload, h));
+        // The hello goes on in the next segment(s) and the name is not in this one: whether a
+        // host-list rule applies cannot be told yet. Keep this segment back and collect the rest.
+        if l7 == L7::Tls && host.is_none() && self.reasm.len() < MAX_HOLDS {
+            if let Some(total) = tls::record_total(payload) {
+                if payload.len() < total && total <= REASM_MAX_BYTES && self.tcp.iter().any(|s| !s.inert && s.could_match(t, l7)) {
+                    self.reasm.insert(
+                        FlowKey::of_tcp(t),
+                        TcpReasm { held: vec![Held { pkt: pkt[..t.end].to_vec(), addr: *addr }], data: payload.to_vec(), total, seq0: t.seq, started: now, mss: payload.len(), last_flags: t.flags },
+                    );
+                    return true;
+                }
+            }
+        }
+        let Some(idx) = self.tcp.iter().position(|s| s.matches(t, l7, host)) else {
+            return false;
+        };
+        if self.tcp[idx].inert {
+            return false;
+        }
+        let (mut out, keep, nfakes) = self.tcp_plan(idx, pkt, t, payload, hello.as_ref(), l7, now);
+        if keep {
+            if out.is_empty() {
+                return false;
+            }
+            out.push(pkt[..t.end].to_vec());
+        }
+        self.stats.fakes_sent += nfakes;
+        self.stats.desynced += 1;
+        for mut p in out {
+            let mut a = *addr;
+            io.finalize(&mut p, &mut a);
+            io.send(&p, &a);
+        }
+        true
+    }
+
+    /// The next segment of a ClientHello that is being collected. `true`: taken over.
+    fn reasm_feed(&mut self, pkt: &[u8], t: &Tcp, addr: &Addr, now: u64, io: &mut dyn PacketIo) -> bool {
+        let key = FlowKey::of_tcp(t);
+        let payload = &pkt[t.payload_off..t.end];
+        let (complete, give_up) = {
+            let Some(r) = self.reasm.get_mut(&key) else { return false };
+            let expect = r.seq0.wrapping_add(r.data.len() as u32);
+            if t.seq == expect {
+                if r.held.len() >= REASM_MAX_SEGMENTS || r.data.len() + payload.len() > REASM_MAX_BYTES {
+                    (false, true)
+                } else {
+                    r.data.extend_from_slice(payload);
+                    r.mss = r.mss.max(payload.len());
+                    r.last_flags = t.flags;
+                    r.held.push(Held { pkt: pkt[..t.end].to_vec(), addr: *addr });
+                    (r.data.len() >= r.total, false)
+                }
+            } else {
+                // the OS retransmitted what is being held: swallow it, the held copy stands in
+                let off = t.seq.wrapping_sub(r.seq0) as usize;
+                let duplicate = off < r.data.len() && payload.len() <= r.data.len() - off && r.data[off..off + payload.len()] == *payload;
+                (false, !duplicate)
+            }
+        };
+        if give_up {
+            // a gap or conflicting data: this is not a plain hello, let everything through
+            if let Some(r) = self.reasm.remove(&key) {
+                self.stats.passed += 1;
+                self.release(r.held, io);
+            }
+            return false;
+        }
+        if complete {
+            self.reasm_finish(key, now, io);
+        }
+        true
+    }
+
+    /// The whole ClientHello is here: choose the rule on the full name and act on the full
+    /// message, as if the OS had sent it in one piece.
+    fn reasm_finish(&mut self, key: FlowKey, now: u64, io: &mut dyn PacketIo) {
+        let Some(r) = self.reasm.remove(&key) else { return };
+        self.stats.reassembled += 1;
+        let first = &r.held[0].pkt;
+        let Some(mut t) = tcp::parse_tcp(first) else {
+            self.release(r.held, io);
+            return;
+        };
+        let payload = &r.data[..];
+        let hello = tls::parse(payload);
+        let host = hello.as_ref().and_then(|h| tls::sni(payload, h));
+        let idx = self.tcp.iter().position(|s| s.matches(&t, L7::Tls, host));
+        let Some(idx) = idx.filter(|&i| !self.tcp[i].inert) else {
+            self.stats.passed += 1;
+            self.release(r.held, io);
+            return;
+        };
+        t.flags = r.last_flags; // PSH of the last segment belongs on what goes out at the end
+        let (out, keep, nfakes) = self.tcp_plan(idx, first, &t, payload, hello.as_ref(), L7::Tls, now);
+        let addr = r.held[0].addr;
+        let out = tcp::chunk_to_mss(out, r.mss.clamp(536, 1460));
+        self.stats.fakes_sent += nfakes;
+        self.stats.desynced += 1;
+        for mut p in out {
+            let mut a = addr;
+            io.finalize(&mut p, &mut a);
+            io.send(&p, &a);
+        }
+        if keep {
+            self.release(r.held, io);
+        }
+    }
+
     /// Decides whether fakes are needed: (rule index, is_quic, repeats, ipv4 id).
-    fn plan_fakes(&mut self, pkt: &[u8], now: u64) -> Option<(usize, bool, u32, u16)> {
+    fn plan_fakes(&mut self, pkt: &[u8], now: u64, host: HostArg) -> Option<(usize, U7, u16)> {
         let u = parse_udp(pkt)?;
-        let ri = self.rules.iter().position(|r| r.matches_port(u.dport))?;
+        let payload = pkt.get(u.payload_off..)?;
+        let class = classify_udp(payload);
+        // the SNI is only read (an AES-GCM decrypt) when a rule actually has a host list
+        let host = match host {
+            HostArg::Given(h) => h,
+            HostArg::Compute if class == Some(U7::Quic) && self.host_rules => quic_sni::host(payload),
+            HostArg::Compute => None,
+        };
+        let ri = self.rules.iter().position(|r| r.matches_port(u.dport) && r.matches_ip(&u.dst, u.v6) && r.matches_l7(class) && r.matches_host(host.as_deref()))?;
 
         let key = FlowKey { v6: u.v6, src: u.src, dst: u.dst, sport: u.sport, dport: u.dport };
         if self.flows.len() >= MAX_FLOWS / 2 && !self.flows.contains_key(&key) {
@@ -387,19 +1378,15 @@ impl Engine {
         let count = flow.packets;
 
         let rule = &self.rules[ri];
-        if rule.cutoff.is_some_and(|n| count >= n) {
+        if rule.cutoff.is_some_and(|n| count >= n) || payload.is_empty() {
             return None;
         }
-        let payload = pkt.get(u.payload_off..)?;
-        if payload.is_empty() {
-            return None;
-        }
-        let quic = is_quic_initial(payload);
-        if !quic && !rule.any_protocol {
-            return None;
-        }
-        let repeats = rule.repeats;
-        if quic {
+        let class = match class {
+            Some(c) => c,
+            None if rule.any_protocol => U7::Unknown,
+            None => return None,
+        };
+        if class == U7::Quic {
             if flow.last_quic_fake_ms.is_some_and(|t| now.saturating_sub(t) < QUIC_REFAKE_MS) {
                 return None;
             }
@@ -407,7 +1394,7 @@ impl Engine {
         }
         let orig_id = if u.v6 { 0 } else { u16::from_be_bytes([pkt[4], pkt[5]]) };
         let ip_id = if u.v6 { 0 } else if orig_id != 0 { orig_id } else { self.rand16() };
-        Some((ri, quic, repeats, ip_id))
+        Some((ri, class, ip_id))
     }
 
     /// Main loop: runs until `recv` reports that the handle is closed.
@@ -417,6 +1404,17 @@ impl Engine {
             let now = clock();
             self.handle(&buf[..n], &addr, now, io);
         }
+    }
+}
+
+/// The main loop for an engine that a timer thread also touches (it calls
+/// [`Engine::flush_expired`]): the lock is held for one packet at a time, never across `recv`.
+pub fn run_shared(engine: &Mutex<Engine>, io: &mut dyn PacketIo, clock: &dyn Fn() -> u64) {
+    let mut buf = vec![0u8; 65_600];
+    while let Some((n, addr)) = io.recv(&mut buf) {
+        let now = clock();
+        let mut e = engine.lock().unwrap_or_else(|p| p.into_inner());
+        e.handle(&buf[..n], &addr, now, io);
     }
 }
 
@@ -475,14 +1473,20 @@ mod tests {
         p
     }
 
+    fn fakes_of(c: U7, blob: Vec<u8>) -> [Vec<Vec<u8>>; 6] {
+        let mut f: [Vec<Vec<u8>>; 6] = Default::default();
+        f[c as usize].push(blob);
+        f
+    }
+
     fn rules() -> Vec<Rule> {
         vec![
-            Rule { ports: vec![(443, 443)], repeats: 6, fake_quic: Some(vec![0xAB; 300]), ..Default::default() },
+            Rule { ports: vec![(443, 443)], repeats: 6, fakes: fakes_of(U7::Quic, vec![0xAB; 300]), ..Default::default() },
             Rule {
                 ports: vec![(500, 500), (8443, 8443)],
                 any_protocol: true,
                 repeats: 12,
-                fake_unknown: Some(vec![0xCD; 200]),
+                fakes: fakes_of(U7::Unknown, vec![0xCD; 200]),
                 cutoff: Some(2),
                 ..Default::default()
             },
@@ -613,9 +1617,9 @@ mod tests {
         assert_eq!(plan.filter, WFRAW);
         assert_eq!(plan.rules.len(), 2);
         assert_eq!(plan.rules[0].repeats, 6);
-        assert!(plan.rules[0].fake_quic.is_some() && plan.rules[0].cutoff.is_none());
+        assert!(plan.rules[0].fakes[U7::Quic as usize].len() == 1 && plan.rules[0].cutoff.is_none());
         assert_eq!(plan.rules[1].repeats, 12);
-        assert!(plan.rules[1].any_protocol && plan.rules[1].fake_unknown.is_some());
+        assert!(plan.rules[1].any_protocol && plan.rules[1].fakes[U7::Unknown as usize].len() == 1);
         assert_eq!(plan.rules[1].cutoff, Some(2));
         assert!(plan.rules[1].matches_port(4500) && !plan.rules[1].matches_port(443));
     }
@@ -623,7 +1627,7 @@ mod tests {
     #[test]
     fn strategies_that_need_lists_tcp_or_ttl_are_refused() {
         use crate::capture::{expand, Vars};
-        use crate::profiles::{find, PROFILES, WFRAW};
+        use crate::profiles::{PROFILES, WFRAW};
         let v = Vars { bin: "B\\", lists: "L\\", wfraw: WFRAW, gf_tcp: "12", gf_udp: "500" };
         let supported: Vec<_> = PROFILES
             .iter()
@@ -631,10 +1635,588 @@ mod tests {
             .map(|p| p.name)
             .collect();
         assert!(supported.contains(&"warp"), "the default WARP strategy must run on the native engine: {supported:?}");
-        let ttl = expand(find("warp-ttl").unwrap().lean.unwrap(), &v);
-        let err = Plan::from_args(&ttl, &read_stub).unwrap_err();
-        assert!(err.contains("unsupported option"), "{err}");
-        assert!(Plan::from_args(&s(&["--filter-tcp=443", "--dpi-desync=fake"]), &read_stub).is_err());
-        assert!(Plan::from_args(&s(&["--wf-tcp=80", "--filter-udp=443", "--dpi-desync=fake"]), &read_stub).is_err());
+        assert!(supported.contains(&"warp-esports") && supported.contains(&"warp-lowburst"), "{supported:?}");
+        assert!(supported.contains(&"warp-esports-ttl") && supported.contains(&"warp-ttl"), "UDP TTL fakes are native now: {supported:?}");
+        assert!(Plan::from_args(&s(&["--wf-raw=x", "--filter-udp=443", "--dpi-desync=fake", "--dpi-desync-autottl=2"]), &read_stub).is_err());
+        assert!(Plan::from_args(&s(&["--filter-tcp=443", "--dpi-desync=disorder2"]), &read_stub).is_err());
+        let g = Plan::from_args(&s(&["--wf-udp=443", "--filter-udp=443", "--dpi-desync=fake"]), &read_stub).unwrap();
+        assert!(g.filter.contains("udp.DstPort==443") && g.filter.contains("udp.PayloadLength>0"), "{}", g.filter);
+    }
+
+    // ------------------------------------------------------------------------- TCP
+
+    fn tcp_reader(p: &str) -> io::Result<Vec<u8>> {
+        use crate::tls::tests::hello;
+        Ok(match p {
+            "FAKE" => hello(Some("www.example.org")),
+            "PAT" => vec![0xAB; 20],
+            "BLOCKED" => b"blocked.test\n".to_vec(),
+            "IPS" => b"104.16.0.0/16\n".to_vec(),
+            _ => vec![1],
+        })
+    }
+
+    fn tls_args() -> Vec<String> {
+        s(&[
+            "--filter-tcp=443",
+            "--hostlist=BLOCKED",
+            "--dpi-desync=fake,multisplit",
+            "--dpi-desync-split-pos=1,midsld",
+            "--dpi-desync-split-seqovl=10",
+            "--dpi-desync-split-seqovl-pattern=PAT",
+            "--dpi-desync-fooling=ts",
+            "--dpi-desync-repeats=2",
+            "--dpi-desync-fake-tls=FAKE",
+            "--dpi-desync-fake-tls-mod=rnd,dupsid,sni=ya.ru",
+            "--ip-id=zero",
+        ])
+    }
+
+    #[test]
+    fn tcp_plan_collects_rule_lists_and_builds_a_kernel_side_filter() {
+        let plan = Plan::from_args(&tls_args(), &tcp_reader).unwrap();
+        assert!(plan.rules.is_empty() && plan.tcp.len() == 1);
+        let t = &plan.tcp[0];
+        assert!(t.fake && t.rule.split == Split::Multisplit && t.rule.seqovl == 10 && t.rule.fake_repeats == 2);
+        assert!(t.rule.fool.ts && t.rule.ip_id_zero && t.include.as_ref().unwrap().contains("a.blocked.test"));
+        assert!(plan.filter.contains("outbound and tcp") && plan.filter.contains("tcp.DstPort==443"));
+        assert!(plan.filter.contains("tcp.PayloadLength>0") && !plan.filter.contains("udp"), "a host-list rule needs the continuation segments too: {}", plan.filter);
+        let plain = Plan::from_args(&s(&["--filter-tcp=443", "--ipset=IPS", "--dpi-desync=multisplit", "--dpi-desync-split-pos=1"]), &tcp_reader).unwrap();
+        assert!(plain.filter.contains("tcp.Payload[0]==0x16") && !plain.filter.contains("tcp.PayloadLength>0"), "{}", plain.filter);
+    }
+
+    #[test]
+    fn http_rule_adds_a_port_80_clause_and_default_split() {
+        let plan = Plan::from_args(&s(&["--filter-tcp=80", "--filter-l7=http", "--dpi-desync=fake,multisplit", "--dpi-desync-split-pos=method+2", "--dpi-desync-fooling=ts"]), &tcp_reader).unwrap();
+        assert!(plan.filter.contains("tcp.DstPort==80") && plan.filter.contains("tcp.Payload[0]>=0x41"));
+        assert!(!plan.filter.contains("0x16"), "an HTTP-only rule does not capture TLS");
+        let mixed = Plan::from_args(&s(&["--wf-raw=udp", "--filter-udp=443", "--dpi-desync=fake", "--new", "--filter-tcp=443", "--dpi-desync=multisplit"]), &tcp_reader).unwrap();
+        assert!(mixed.filter.starts_with("(udp) or (not impostor"), "{}", mixed.filter);
+    }
+
+    #[test]
+    fn unsupported_tcp_features_are_refused_so_the_launcher_falls_back() {
+        let bad = |extra: &[&str]| {
+            let mut a = s(&["--filter-tcp=443", "--dpi-desync=multisplit"]);
+            a.extend(s(extra));
+            Plan::from_args(&a, &tcp_reader).is_err()
+        };
+        assert!(bad(&["--dpi-desync-fooling=badsum"]));
+        assert!(bad(&["--dpi-desync-cutoff=n3"]));
+        assert!(bad(&["--dpi-desync-autottl6=2"]));
+        assert!(bad(&["--filter-l7=discord"]));
+        assert!(bad(&["--hostlist=BLOCKED", "--ipset=IPS"]));
+        assert!(bad(&["--dpi-desync-fake-tls-mod=padencap"]));
+        assert!(Plan::from_args(&s(&["--filter-tcp=443", "--dpi-desync=fake,fakedsplit,multisplit"]), &tcp_reader).is_err(), "two split modes");
+        assert!(bad(&["--dpi-desync-hostfakesplit-midhost=host+1"]));
+        assert!(Plan::from_args(&s(&["--filter-tcp=443", "--dpi-desync=rst"]), &tcp_reader).is_err());
+        let b = Plan::from_args(&s(&["--filter-tcp=443", "--dpi-desync=fake"]), &tcp_reader).unwrap();
+        let (blob, m) = &b.tcp[0].fake_tls[0];
+        assert_eq!((blob.len(), m.rnd, m.dupsid), (680, true, true), "built-in blob with zapret's default mods");
+        let sni = |x: &[u8]| tls::sni(x, &tls::parse(x).unwrap()).unwrap().to_owned();
+        assert_ne!(sni(blob), "www.microsoft.com", "rndsni ran once at plan time");
+        let c = Plan::from_args(&s(&["--filter-tcp=443", "--dpi-desync=fake", "--dpi-desync-fake-tls=FAKE"]), &tcp_reader).unwrap();
+        assert!(!c.tcp[0].fake_tls[0].1.rnd, "a custom blob gets no default mods");
+        // two blobs, the mod written after them belongs to the last one only (zapret: tls_fake_last)
+        let two = Plan::from_args(&s(&["--filter-tcp=443", "--dpi-desync=fake", "--dpi-desync-fake-tls=PAT", "--dpi-desync-fake-tls=FAKE", "--dpi-desync-fake-tls-mod=rnd"]), &tcp_reader).unwrap();
+        assert_eq!(two.tcp[0].fake_tls.len(), 2);
+        assert!(!two.tcp[0].fake_tls[0].1.rnd && two.tcp[0].fake_tls[1].1.rnd);
+    }
+
+    #[test]
+    fn client_hello_for_a_listed_host_is_faked_and_split_and_the_original_is_not_sent() {
+        use crate::tcp::tests::mk4;
+        use crate::tls::tests::hello;
+        let plan = Plan::from_args(&tls_args(), &tcp_reader).unwrap();
+        let ch = hello(Some("www.blocked.test"));
+        let pkt = mk4(5000, 7, &ch);
+        let mut e = Engine::new(Vec::new(), 5).with_tcp(plan.tcp);
+        let mut io = Mock::default();
+        e.handle(&pkt, &Addr::default(), 0, &mut io);
+        assert_eq!(io.sent.len(), 2 + 3, "2 fakes + 3 split segments");
+        assert!(!io.sent.contains(&pkt));
+        let f = crate::tcp::parse_tcp(&io.sent[0]).unwrap();
+        assert_eq!(f.seq, 5000, "a ts-fooled fake keeps the SEQ");
+        assert_eq!(&io.sent[0][4..6], &[0, 0], "--ip-id=zero");
+        let fake_hello = &io.sent[0][f.payload_off..f.end];
+        assert_eq!(tls::sni(fake_hello, &tls::parse(fake_hello).unwrap()), Some("ya.ru"));
+        let first = crate::tcp::parse_tcp(&io.sent[2]).unwrap();
+        assert_eq!(first.seq, 4990, "seqovl 10 in front of the first segment");
+        assert_eq!((e.stats.desynced, e.stats.fakes_sent, e.stats.passed), (1, 2, 0));
+    }
+
+    #[test]
+    fn other_hosts_other_ports_and_other_payloads_pass_untouched() {
+        use crate::tcp::tests::mk4;
+        use crate::tls::tests::hello;
+        let plan = Plan::from_args(&tls_args(), &tcp_reader).unwrap();
+        let mut e = Engine::new(Vec::new(), 5).with_tcp(plan.tcp);
+        let mut io = Mock::default();
+        let allowed = mk4(1, 1, &hello(Some("fine.example")));
+        let no_sni = mk4(1, 1, &hello(None));
+        let app_data = mk4(1, 1, &[0x17, 3, 3, 0, 5, 1, 2, 3, 4, 5]);
+        let mut other_port = mk4(1, 1, &hello(Some("a.blocked.test")));
+        other_port[22..24].copy_from_slice(&8443u16.to_be_bytes());
+        for p in [&allowed, &no_sni, &app_data, &other_port] {
+            e.handle(p, &Addr::default(), 0, &mut io);
+        }
+        assert_eq!(io.sent, vec![allowed, no_sni, app_data, other_port]);
+        assert_eq!((e.stats.desynced, e.stats.passed), (0, 4));
+    }
+
+    #[test]
+    fn ipset_include_and_exclude_select_by_destination() {
+        use crate::tcp::tests::mk4;
+        use crate::tls::tests::hello;
+        let inc = Plan::from_args(&s(&["--filter-tcp=443", "--ipset=IPS", "--dpi-desync=multisplit", "--dpi-desync-split-pos=1"]), &tcp_reader).unwrap();
+        let exc = Plan::from_args(&s(&["--filter-tcp=443", "--ipset-exclude=IPS", "--dpi-desync=multisplit", "--dpi-desync-split-pos=1"]), &tcp_reader).unwrap();
+        let pkt = mk4(1, 1, &hello(Some("x.test"))); // destination 104.16.1.1
+        for (plan, expect) in [(inc, 2), (exc, 1)] {
+            let mut e = Engine::new(Vec::new(), 5).with_tcp(plan.tcp);
+            let mut io = Mock::default();
+            e.handle(&pkt, &Addr::default(), 0, &mut io);
+            assert_eq!(io.sent.len(), expect);
+        }
+    }
+
+    #[test]
+    fn http_request_is_split_after_two_bytes_of_the_method() {
+        use crate::tcp::tests::mk4;
+        let plan = Plan::from_args(&s(&["--filter-tcp=80", "--filter-l7=http", "--dpi-desync=fake,multisplit", "--dpi-desync-split-pos=method+2", "--dpi-desync-fooling=ts", "--dpi-desync-repeats=4"]), &tcp_reader).unwrap();
+        let req = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let mut pkt = mk4(100, 1, req);
+        pkt[22..24].copy_from_slice(&80u16.to_be_bytes());
+        let mut e = Engine::new(Vec::new(), 5).with_tcp(plan.tcp);
+        let mut io = Mock::default();
+        e.handle(&pkt, &Addr::default(), 0, &mut io);
+        assert_eq!(io.sent.len(), 4 + 2);
+        let t = crate::tcp::parse_tcp(&io.sent[4]).unwrap();
+        assert_eq!(&io.sent[4][t.payload_off..t.end], b"GE");
+        let t = crate::tcp::parse_tcp(&io.sent[5]).unwrap();
+        assert_eq!((t.seq, &io.sent[5][t.payload_off..t.end]), (102, &req[2..]));
+    }
+
+    #[test]
+    fn the_udp_path_is_unaffected_by_tcp_rules() {
+        let plan = Plan::from_args(&tls_args(), &tcp_reader).unwrap();
+        let mut e = Engine::new(rules(), 1).with_tcp(plan.tcp);
+        let mut io = Mock::default();
+        let p = udp4(50000, 443, 64, 7, &sample_initial(1200));
+        e.handle(&p, &Addr::default(), 0, &mut io);
+        assert_eq!(io.sent.len(), 7, "six fakes and the original");
+    }
+
+    // ------------------------------------------------------------------------- UDP, per protocol
+
+    fn udp_plan(extra: &[&str]) -> Vec<Rule> {
+        let mut a = s(&["--wf-raw=x"]);
+        a.extend(s(extra));
+        Plan::from_args(&a, &tcp_reader).unwrap().rules
+    }
+
+    fn run_udp(rules: Vec<Rule>, pkt: &[u8]) -> Vec<Vec<u8>> {
+        let mut e = Engine::new(rules, 3);
+        let mut io = Mock::default();
+        e.handle(pkt, &Addr::default(), 0, &mut io);
+        io.sent
+    }
+
+    fn udp_payload(p: &[u8]) -> &[u8] {
+        &p[28..]
+    }
+
+    #[test]
+    fn several_fake_quic_blobs_go_out_in_order_each_repeated() {
+        let rules = udp_plan(&["--filter-udp=443", "--dpi-desync=fake", "--dpi-desync-repeats=2", "--dpi-desync-fake-quic=PAT", "--dpi-desync-fake-quic=FAKE"]);
+        let orig = udp4(50000, 443, 64, 7, &sample_initial(1200));
+        let sent = run_udp(rules, &orig);
+        assert_eq!(sent.len(), 5, "2 blobs x 2 repeats + the original");
+        let first = udp_payload(&sent[0]).len();
+        assert_eq!((udp_payload(&sent[1]).len(), udp_payload(&sent[2]).len()), (first, tls_reader_len("FAKE")));
+        assert_eq!(sent[4], orig);
+    }
+
+    fn tls_reader_len(p: &str) -> usize {
+        tcp_reader(p).unwrap().len()
+    }
+
+    #[test]
+    fn a_rule_without_fakes_uses_zaprets_defaults_per_protocol() {
+        let rules = udp_plan(&["--filter-udp=443,4500", "--dpi-desync=fake", "--dpi-desync-any-protocol=1", "--dpi-desync-fake-unknown-udp=PAT"]);
+        // QUIC Initial: built-in 620 bytes, first byte 0x40
+        let q = run_udp(rules.clone(), &udp4(50000, 443, 64, 7, &sample_initial(1200)));
+        assert_eq!(udp_payload(&q[0]).len(), 620);
+        assert_eq!(udp_payload(&q[0])[0], 0x40);
+        // WireGuard handshake initiation (148 bytes, first byte 1): the *wireguard* fake (64 zeros),
+        // not the unknown-protocol blob
+        let mut wg = vec![0u8; 148];
+        wg[0] = 1;
+        let w = run_udp(rules.clone(), &udp4(50000, 4500, 64, 7, &wg));
+        assert_eq!(udp_payload(&w[0]), &[0u8; 64][..]);
+        // anything else: the unknown-protocol blob from the rule
+        let u = run_udp(rules, &udp4(50000, 4500, 64, 7, &[9u8; 100]));
+        assert_eq!(udp_payload(&u[0]), &[0xABu8; 20][..]);
+    }
+
+    #[test]
+    fn udp_ttl_applies_to_ipv4_fakes_only_not_to_the_original() {
+        let rules = udp_plan(&["--filter-udp=443", "--dpi-desync=fake", "--dpi-desync-repeats=1", "--dpi-desync-ttl=5", "--dpi-desync-fake-quic=FAKE"]);
+        let orig = udp4(50000, 443, 64, 7, &sample_initial(1200));
+        let sent = run_udp(rules, &orig);
+        assert_eq!((sent[0][8], sent[1][8]), (5, 64));
+        assert_eq!(csum_fold(csum_add(0, &sent[0][..20])), 0, "IP checksum is valid with the new TTL");
+    }
+
+    #[test]
+    fn l7_filter_selects_discord_and_stun_and_ignores_everything_else() {
+        let rules = udp_plan(&["--filter-udp=1000-65535", "--filter-l7=discord,stun", "--dpi-desync=fake", "--dpi-desync-repeats=3", "--dpi-desync-fake-discord=PAT", "--dpi-desync-fake-stun=FAKE"]);
+        let mut discord = vec![0u8; 74];
+        discord[1] = 1;
+        discord[3] = 70;
+        let mut stun = vec![0u8; 28];
+        stun[3] = 8;
+        stun[4..8].copy_from_slice(&[0x21, 0x12, 0xA4, 0x42]);
+        let d = run_udp(rules.clone(), &udp4(50000, 50010, 64, 7, &discord));
+        assert_eq!((d.len(), udp_payload(&d[0]).len()), (4, 20));
+        let t = run_udp(rules.clone(), &udp4(50000, 3478, 64, 7, &stun));
+        assert_eq!((t.len(), udp_payload(&t[0]).len()), (4, tls_reader_len("FAKE")));
+        let other = udp4(50000, 50010, 64, 7, &[5u8; 80]);
+        assert_eq!(run_udp(rules.clone(), &other), vec![other.clone()]);
+        discord[10] = 1; // not an IP discovery request any more
+        let nd = udp4(50000, 50010, 64, 7, &discord);
+        assert_eq!(run_udp(rules, &nd), vec![nd]);
+    }
+
+    #[test]
+    fn udp_ipset_selects_by_destination() {
+        let inc = udp_plan(&["--filter-udp=443", "--ipset=IPS", "--dpi-desync=fake", "--dpi-desync-fake-quic=PAT"]);
+        let exc = udp_plan(&["--filter-udp=443", "--ipset-exclude=IPS", "--dpi-desync=fake", "--dpi-desync-fake-quic=PAT"]);
+        let to_listed = udp4(50000, 443, 64, 7, &sample_initial(1200));
+        let mut to_other = to_listed.clone();
+        to_other[16..20].copy_from_slice(&[8, 8, 8, 8]);
+        to_listed.len(); // 162.159.197.5 is outside 104.16.0.0/16, so make a listed one too
+        let mut listed = to_listed.clone();
+        listed[16..20].copy_from_slice(&[104, 16, 9, 9]);
+        assert_eq!((run_udp(inc.clone(), &listed).len(), run_udp(inc, &to_other).len()), (2, 1));
+        assert_eq!((run_udp(exc.clone(), &listed).len(), run_udp(exc, &to_other).len()), (1, 2));
+    }
+
+    // ------------------------------------------------------------------------- QUIC host lists
+
+    const QV1: &[u8] = include_bytes!("data/quic_initial_v1.bin");
+    const QSPLIT: &[u8] = include_bytes!("data/quic_initial_v1_split.bin");
+    const QTAIL: &[u8] = include_bytes!("data/quic_initial_v1_tail.bin");
+
+    #[test]
+    fn quic_hostlist_rule_fakes_only_listed_hosts_and_builds_a_narrow_filter() {
+        let a = &["--filter-udp=443", "--hostlist-domains=example.com", "--dpi-desync=fake", "--dpi-desync-repeats=2", "--dpi-desync-fake-quic=PAT"];
+        let plan = Plan::from_args(&s(a), &tcp_reader).unwrap();
+        assert!(plan.filter.contains("udp.DstPort==443") && plan.filter.contains("udp.Payload[0]>=0xC0"), "{}", plan.filter);
+        let listed = udp4(50000, 443, 64, 7, QV1);
+        let other = udp4(50000, 443, 64, 7, QSPLIT);
+        let no_name = udp4(50000, 443, 64, 7, QTAIL);
+        assert_eq!(run_udp(plan.rules.clone(), &listed).len(), 3, "2 fakes + the original");
+        assert_eq!(run_udp(plan.rules.clone(), &other), vec![other.clone()], "www.blocked.test is not listed");
+        assert_eq!(run_udp(plan.rules.clone(), &no_name), vec![no_name.clone()], "no SNI in this datagram: an include list cannot match");
+        assert_eq!(run_udp(plan.rules, &udp4(50000, 443, 64, 7, &[1u8; 300])).len(), 1);
+    }
+
+    #[test]
+    fn quic_hostlist_exclude_now_works_on_the_decrypted_sni() {
+        let exc = Plan::from_args(&s(&["--filter-udp=443", "--hostlist-exclude-domains=x", "--dpi-desync=fake", "--dpi-desync-fake-quic=PAT"]), &tcp_reader);
+        assert!(exc.is_err(), "unknown option");
+        let mut a = s(&["--filter-udp=443", "--hostlist-exclude=BLOCKED", "--dpi-desync=fake", "--dpi-desync-fake-quic=PAT"]);
+        a.insert(0, "--wf-raw=x".into());
+        let rules = Plan::from_args(&a, &tcp_reader).unwrap().rules;
+        let blocked = udp4(50000, 443, 64, 7, QSPLIT); // www.blocked.test: subdomain of the excluded blocked.test
+        let fine = udp4(50000, 443, 64, 7, QV1);
+        assert_eq!(run_udp(rules.clone(), &blocked), vec![blocked.clone()]);
+        assert_eq!(run_udp(rules, &fine).len(), 2);
+    }
+
+    // ------------------------------------------------------------------------- autottl, syndata
+
+    #[test]
+    fn autottl_parse_and_eval_follow_zapret() {
+        assert_eq!(AutoTtl::parse("2").unwrap(), Some(AutoTtl { delta: -2, min: 3, max: 20 }));
+        assert_eq!(AutoTtl::parse("+2").unwrap(), Some(AutoTtl { delta: 2, min: 3, max: 20 }));
+        assert_eq!(AutoTtl::parse("3:5-9").unwrap(), Some(AutoTtl { delta: -3, min: 5, max: 9 }));
+        assert_eq!(AutoTtl::parse("-").unwrap(), None);
+        assert!(AutoTtl::parse("x").is_err() && AutoTtl::parse("200").is_err() && AutoTtl::parse("2:9-4").is_err());
+        let a = AutoTtl::parse("2").unwrap().unwrap();
+        assert_eq!(a.eval(10), Some(8));
+        assert_eq!(a.eval(3), None, "min 3 is not below 3 hops: the fake would reach the server");
+        assert_eq!(a.eval(40), Some(20), "clamped to max");
+        let p = AutoTtl::parse("+2").unwrap().unwrap();
+        assert_eq!(p.eval(10), Some(12));
+    }
+
+    #[test]
+    fn hop_count_is_guessed_from_the_usual_initial_ttls() {
+        assert_eq!([hop_count_guess(57), hop_count_guess(117), hop_count_guess(250)], [7, 11, 5]);
+        assert_eq!([hop_count_guess(64), hop_count_guess(128), hop_count_guess(20)], [0, 0, 0]);
+    }
+
+    fn synack_from(server: [u8; 4], ttl: u8) -> Vec<u8> {
+        use crate::tcp::tests::mk4;
+        let mut p = mk4(777, 1, &[]);
+        p[8] = ttl;
+        p[12..16].copy_from_slice(&server);
+        p[16..20].copy_from_slice(&[10, 0, 0, 2]);
+        p[20..22].copy_from_slice(&443u16.to_be_bytes());
+        p[22..24].copy_from_slice(&40000u16.to_be_bytes());
+        p[33] = 0x12;
+        p
+    }
+
+    #[test]
+    fn autottl_fakes_use_the_hop_count_learned_from_the_syn_ack() {
+        use crate::tcp::tests::mk4;
+        use crate::tls::tests::hello;
+        let args = s(&["--filter-tcp=443", "--dpi-desync=fake,multisplit", "--dpi-desync-split-pos=1", "--dpi-desync-fake-tls=FAKE", "--dpi-desync-autottl=2", "--dpi-desync-fooling=ts"]);
+        let plan = Plan::from_args(&args, &tcp_reader).unwrap();
+        assert!(plan.filter.contains("inbound and tcp and tcp.Syn and tcp.Ack") && plan.filter.contains("tcp.SrcPort==443"), "{}", plan.filter);
+        let mut e = Engine::new(Vec::new(), 5).with_tcp(plan.tcp);
+        let mut io = Mock::default();
+        let ch = mk4(5000, 1, &hello(Some("x.example.com"))); // destination 104.16.1.1
+        // no SYN-ACK seen yet: the fake keeps the original TTL
+        e.handle(&ch, &Addr::default(), 0, &mut io);
+        assert_eq!(io.sent[0][8], 64);
+        // server TTL 52 -> 12 hops -> fake TTL 10; real segments are untouched
+        let sa = synack_from([104, 16, 1, 1], 52);
+        e.handle(&sa, &Addr::default(), 1_000, &mut io);
+        assert_eq!(io.sent.last().unwrap(), &sa, "the SYN-ACK itself passes through");
+        io.sent.clear();
+        e.handle(&ch, &Addr::default(), 2_000, &mut io);
+        assert_eq!((io.sent[0][8], io.sent[1][8], io.sent[2][8]), (10, 64, 64));
+        // the entry expires after zapret's two hours
+        io.sent.clear();
+        e.handle(&ch, &Addr::default(), 2_000 + 7_300_000, &mut io);
+        assert_eq!(io.sent[0][8], 64);
+    }
+
+    #[test]
+    fn syndata_with_a_host_list_never_fires_on_the_syn_so_only_the_data_stage_remains() {
+        let ok = Plan::from_args(&s(&["--filter-tcp=2053,8443", "--hostlist-domains=discord.media", "--dpi-desync=syndata,multidisorder"]), &tcp_reader).unwrap();
+        assert!(ok.tcp[0].rule.split == Split::Multidisorder && !ok.tcp[0].fake);
+        assert!(!ok.filter.contains("tcp.Syn and tcp.PayloadLength"), "no SYN capture is needed: {}", ok.filter);
+        let any = Plan::from_args(&s(&["--filter-tcp=2053", "--dpi-desync=syndata,multidisorder"]), &tcp_reader).unwrap();
+        assert_eq!(any.tcp[0].syndata, Some(vec![0u8; 16]), "zapret's default is 16 zero bytes");
+        assert!(any.filter.contains("tcp.Syn and tcp.Ack==0"), "{}", any.filter);
+        assert!(Plan::from_args(&s(&["--filter-tcp=2053", "--filter-l7=tls", "--dpi-desync=syndata"]), &tcp_reader).is_err());
+    }
+
+    fn syn_packet(options: &[u8]) -> Vec<u8> {
+        use crate::tcp::tests::mk4;
+        let mut p = mk4(4000, 0, &[]);
+        p.truncate(20 + 20); // IP + a bare TCP header
+        p[20 + 12] = ((20 + options.len()) as u8 / 4) << 4;
+        p[20 + 13] = 0x02; // SYN
+        p.extend_from_slice(options);
+        let total = p.len() as u16;
+        p[2..4].copy_from_slice(&total.to_be_bytes());
+        p
+    }
+
+    #[test]
+    fn syndata_replaces_the_syn_with_one_that_carries_junk_and_repeats_it() {
+        let plan = Plan::from_args(&s(&["--filter-tcp=443", "--dpi-desync=syndata,multisplit", "--dpi-desync-split-pos=1", "--dpi-desync-repeats=3"]), &tcp_reader).unwrap();
+        let mut e = Engine::new(Vec::new(), 5).with_tcp(plan.tcp);
+        let mut io = Mock::default();
+        let syn = syn_packet(&[2, 4, 5, 0xb4, 1, 3, 3, 8]); // MSS 1460, NOP, WS 8
+        e.handle(&syn, &Addr::default(), 0, &mut io);
+        assert_eq!(io.sent.len(), 3, "the original is dropped; the replacement goes out 3 times");
+        let t = crate::tcp::parse_tcp(&io.sent[0]).unwrap();
+        assert_eq!((t.flags, t.seq, t.end - t.payload_off), (0x02, 4000, 16));
+        assert_eq!(&io.sent[0][t.ip_len + 20..t.payload_off], &[2, 4, 5, 0xb4, 1, 3, 3, 8], "options are kept");
+        // Fast Open and SYNs that already have data are not touched
+        let tfo = syn_packet(&[34, 2, 1, 1]);
+        io.sent.clear();
+        e.handle(&tfo, &Addr::default(), 0, &mut io);
+        assert_eq!(io.sent, vec![tfo]);
+        let mut with_data = syn_packet(&[]);
+        with_data.extend_from_slice(&[9; 5]);
+        let total = with_data.len() as u16;
+        with_data[2..4].copy_from_slice(&total.to_be_bytes());
+        io.sent.clear();
+        e.handle(&with_data, &Addr::default(), 0, &mut io);
+        assert_eq!(io.sent, vec![with_data]);
+    }
+    // ------------------------------------------------------------------------- reassembly
+
+    fn late_hello(host: &str) -> Vec<u8> {
+        crate::tls::tests::hello_late_sni(host, 1800)
+    }
+
+    /// Stream bytes the server would end up with from the real (non-fake) segments of `sent`.
+    fn stream_of(sent: &[Vec<u8>], seq0: u32, len: usize) -> Vec<u8> {
+        let mut out = vec![0u8; len];
+        let mut seen = vec![false; len];
+        for p in sent {
+            let t = crate::tcp::parse_tcp(p).unwrap();
+            for (i, b) in p[t.payload_off..t.end].iter().enumerate() {
+                let off = t.seq.wrapping_add(i as u32).wrapping_sub(seq0) as i32;
+                if off >= 0 && (off as usize) < len && !seen[off as usize] {
+                    out[off as usize] = *b;
+                    seen[off as usize] = true;
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_hello_cut_in_two_segments_is_collected_and_desynchronised_as_one_message() {
+        use crate::tcp::tests::mk4;
+        let ch = late_hello("www.blocked.test");
+        let (a, b) = ch.split_at(1400);
+        let plan = Plan::from_args(&tls_args(), &tcp_reader).unwrap();
+        assert!(plan.filter.contains("tcp.PayloadLength>0"));
+        let mut e = Engine::new(Vec::new(), 5).with_tcp(plan.tcp);
+        let mut io = Mock::default();
+        let (pa, pb) = (mk4(5000, 7, a), mk4(5000 + 1400, 7, b));
+        e.handle(&pa, &Addr::default(), 0, &mut io);
+        assert!(io.sent.is_empty(), "the first segment is held: the name is not in it");
+        e.handle(&pb, &Addr::default(), 1, &mut io);
+        assert!(!io.sent.is_empty() && !io.sent.contains(&pa) && !io.sent.contains(&pb));
+        let f = crate::tcp::parse_tcp(&io.sent[0]).unwrap();
+        assert_eq!(f.seq, 5000);
+        assert!(io.sent.iter().all(|p| p.len() <= 20 + 32 + 1400 + 20), "no packet above one segment");
+        let real = &io.sent[2..];
+        assert_eq!(stream_of(real, 5000, ch.len()), ch, "the server reassembles the whole hello");
+        assert_eq!(crate::tcp::parse_tcp(&io.sent[2]).unwrap().seq, 4990, "seqovl in front of the first piece");
+        assert_eq!((e.stats.desynced, e.stats.reassembled, e.stats.passed), (1, 1, 0));
+    }
+
+    #[test]
+    fn a_collected_hello_for_an_unlisted_host_goes_out_unchanged_and_in_order() {
+        use crate::tcp::tests::mk4;
+        let ch = late_hello("www.fine.test");
+        let (a, b) = ch.split_at(1400);
+        let plan = Plan::from_args(&tls_args(), &tcp_reader).unwrap();
+        let mut e = Engine::new(Vec::new(), 5).with_tcp(plan.tcp);
+        let mut io = Mock::default();
+        let (pa, pb) = (mk4(100, 7, a), mk4(1500, 7, b));
+        e.handle(&pa, &Addr::default(), 0, &mut io);
+        e.handle(&pb, &Addr::default(), 0, &mut io);
+        assert_eq!(io.sent, vec![pa, pb]);
+    }
+
+    #[test]
+    fn a_held_segment_is_released_when_the_rest_never_comes() {
+        use crate::tcp::tests::mk4;
+        let ch = late_hello("www.blocked.test");
+        let plan = Plan::from_args(&tls_args(), &tcp_reader).unwrap();
+        let mut e = Engine::new(Vec::new(), 5).with_tcp(plan.tcp);
+        let mut io = Mock::default();
+        let pa = mk4(100, 7, &ch[..1400]);
+        e.handle(&pa, &Addr::default(), 0, &mut io);
+        e.flush_expired(100, &mut io);
+        assert!(io.sent.is_empty(), "not yet");
+        e.flush_expired(REASM_TIMEOUT_MS, &mut io);
+        assert_eq!(io.sent, vec![pa.clone()]);
+        // any later packet also lets stale ones go
+        let mut io = Mock::default();
+        e.handle(&pa, &Addr::default(), 1000, &mut io);
+        let other = mk4(9, 9, b"\x17\x03\x03\x00\x01x");
+        e.handle(&other, &Addr::default(), 1000 + REASM_TIMEOUT_MS, &mut io);
+        assert_eq!(io.sent, vec![pa, other]);
+    }
+
+    #[test]
+    fn a_retransmitted_first_segment_is_swallowed_and_a_gap_gives_up() {
+        use crate::tcp::tests::mk4;
+        let ch = late_hello("www.blocked.test");
+        let (a, b) = ch.split_at(1400);
+        let plan = Plan::from_args(&tls_args(), &tcp_reader).unwrap();
+        let mut e = Engine::new(Vec::new(), 5).with_tcp(plan.tcp);
+        let mut io = Mock::default();
+        let pa = mk4(5000, 7, a);
+        e.handle(&pa, &Addr::default(), 0, &mut io);
+        e.handle(&pa, &Addr::default(), 10, &mut io);
+        assert!(io.sent.is_empty(), "duplicate swallowed");
+        e.handle(&mk4(6400, 7, b), &Addr::default(), 20, &mut io);
+        assert_eq!(stream_of(&io.sent[2..], 5000, ch.len()), ch);
+        // a gap: the third piece arrives, the second never did
+        let plan = Plan::from_args(&tls_args(), &tcp_reader).unwrap();
+        let mut e = Engine::new(Vec::new(), 5).with_tcp(plan.tcp);
+        let mut io = Mock::default();
+        let gap = mk4(5000 + 1500, 7, b);
+        e.handle(&pa, &Addr::default(), 0, &mut io);
+        e.handle(&gap, &Addr::default(), 1, &mut io);
+        assert_eq!(io.sent, vec![pa, gap], "nothing is lost or reordered");
+    }
+
+    #[test]
+    fn a_hello_whose_name_is_in_the_first_segment_is_not_held() {
+        use crate::tcp::tests::mk4;
+        let ch = crate::tls::tests::hello_late_sni("www.blocked.test", 0);
+        let mut big = ch.clone();
+        big.extend_from_slice(&[0; 10]);
+        let plan = Plan::from_args(&tls_args(), &tcp_reader).unwrap();
+        let mut e = Engine::new(Vec::new(), 5).with_tcp(plan.tcp);
+        let mut io = Mock::default();
+        // the record header promises more than the segment holds, but the SNI is already known
+        let mut cut = ch.clone();
+        let n = cut.len();
+        cut[3..5].copy_from_slice(&((n - 5 + 300) as u16).to_be_bytes());
+        e.handle(&mk4(1, 1, &cut), &Addr::default(), 0, &mut io);
+        assert!(!io.sent.is_empty(), "desynchronised at once");
+        assert_eq!(e.stats.reassembled, 0);
+    }
+
+    #[test]
+    fn flush_all_sends_what_is_held() {
+        use crate::tcp::tests::mk4;
+        let ch = late_hello("www.blocked.test");
+        let plan = Plan::from_args(&tls_args(), &tcp_reader).unwrap();
+        let mut e = Engine::new(Vec::new(), 5).with_tcp(plan.tcp);
+        let mut io = Mock::default();
+        let pa = mk4(100, 7, &ch[..1400]);
+        e.handle(&pa, &Addr::default(), 0, &mut io);
+        e.flush_all(&mut io);
+        assert_eq!(io.sent, vec![pa]);
+    }
+
+    fn quic_rules() -> Vec<Rule> {
+        let a = &["--wf-raw=x", "--filter-udp=443", "--hostlist-domains=example.org", "--dpi-desync=fake", "--dpi-desync-repeats=2", "--dpi-desync-fake-quic=PAT"];
+        Plan::from_args(&s(a), &tcp_reader).unwrap().rules
+    }
+
+    fn quic_pair(host: &str) -> (Vec<u8>, Vec<u8>) {
+        use crate::quic_sni::tests::build_initial;
+        let rec = crate::tls::tests::hello_late_sni(host, 1500);
+        let hs = &rec[5..];
+        let (a, b) = hs.split_at(1000);
+        (udp4(50000, 443, 64, 7, &build_initial(&[9; 8], 0, &[(0, a)])), udp4(50000, 443, 64, 8, &build_initial(&[9; 8], 1, &[(1000, b)])))
+    }
+
+    #[test]
+    fn a_quic_hello_in_two_datagrams_is_judged_on_the_name_from_the_second() {
+        let (d1, d2) = quic_pair("late.example.org");
+        let mut e = Engine::new(quic_rules(), 3);
+        let mut io = Mock::default();
+        e.handle(&d1, &Addr::default(), 0, &mut io);
+        assert!(io.sent.is_empty(), "held until the name is known");
+        e.handle(&d2, &Addr::default(), 1, &mut io);
+        assert_eq!(io.sent.len(), 4, "2 fake copies, then both datagrams");
+        assert_eq!((&io.sent[2], &io.sent[3]), (&d1, &d2));
+        assert_ne!(io.sent[0], d1);
+        assert_eq!((e.stats.reassembled, e.stats.desynced), (1, 1));
+    }
+
+    #[test]
+    fn quic_datagrams_of_an_unlisted_host_pass_in_order_and_a_lone_one_is_released_by_the_timer() {
+        let (d1, d2) = quic_pair("late.other.test");
+        let mut e = Engine::new(quic_rules(), 3);
+        let mut io = Mock::default();
+        e.handle(&d1, &Addr::default(), 0, &mut io);
+        e.handle(&d2, &Addr::default(), 1, &mut io);
+        assert_eq!(io.sent, vec![d1.clone(), d2]);
+        let (l1, _) = quic_pair("late.example.org");
+        let mut io = Mock::default();
+        e.handle(&l1, &Addr::default(), 1000, &mut io);
+        e.flush_expired(1000 + QHOLD_TIMEOUT_MS, &mut io);
+        assert_eq!(io.sent, vec![l1], "the name never came: an include list cannot match, the datagram goes alone");
     }
 }

@@ -18,16 +18,17 @@
 //! WinDivert binding for the native engine (EXPERIMENTAL, opt-in via `--native`).
 //!
 //! `WinDivert.dll` is loaded at run time from `bin\` (the DLL looks for `WinDivert64.sys` next to
-//! itself), so nothing is linked statically and the same files shipped for winws are reused.
+//! itself), so nothing is linked statically.
 
 use std::ffi::{c_void, CString};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
-use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST};
+use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentThread, OpenMutexW, SetThreadPriority, THREAD_PRIORITY_HIGHEST};
 
 use crate::engine::{Addr, Engine, PacketIo, Plan, Stats};
 use crate::sys::wide;
@@ -37,6 +38,7 @@ type FnRecv = unsafe extern "C" fn(HANDLE, *mut c_void, u32, *mut u32, *mut Addr
 type FnSend = unsafe extern "C" fn(HANDLE, *const c_void, u32, *mut u32, *const Addr) -> BOOL;
 type FnClose = unsafe extern "C" fn(HANDLE) -> BOOL;
 type FnShutdown = unsafe extern "C" fn(HANDLE, i32) -> BOOL;
+type FnSetParam = unsafe extern "C" fn(HANDLE, i32, u64) -> BOOL;
 type FnCalc = unsafe extern "C" fn(*mut c_void, u32, *mut Addr, u64) -> BOOL;
 
 struct Api {
@@ -45,6 +47,7 @@ struct Api {
     close: FnClose,
     shutdown: Option<FnShutdown>,
     calc: Option<FnCalc>,
+    set_param: Option<FnSetParam>,
 }
 
 struct Shared {
@@ -96,7 +99,60 @@ impl PacketIo for WdIo {
 
 pub struct Native {
     shared: Arc<Shared>,
-    thread: Option<JoinHandle<Stats>>,
+    thread: Option<JoinHandle<()>>,
+    flusher: Option<JoinHandle<()>>,
+    engine: Arc<Mutex<Engine>>,
+    stop: Arc<AtomicBool>,
+    /// Held while the engine runs: a second process must not open WinDivert again (every fake
+    /// would go out twice). Windows releases it when the process ends, however it ends.
+    _guard: Guard,
+}
+
+/// The engine mutex; closing it (also on every early return of `start`) frees the name.
+struct Guard(HANDLE);
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
+// the handle is only used to close it
+unsafe impl Send for Guard {}
+
+/// Machine-wide name of the "an engine is running" mutex.
+const GUARD_NAME: &str = "Global\\NetFreedomEngine";
+const SYNCHRONIZE: u32 = 0x0010_0000;
+
+/// Is the engine of *another* NetFreedom process running?
+pub fn other_instance_running() -> bool {
+    if is_active() {
+        return false;
+    }
+    let name = wide(GUARD_NAME);
+    let h = unsafe { OpenMutexW(SYNCHRONIZE, 0, name.as_ptr()) };
+    if h.is_null() {
+        return false;
+    }
+    unsafe { CloseHandle(h) };
+    true
+}
+
+/// Ends the other NetFreedom processes that hold the engine (their handle closes with them).
+/// Returns how many were ended.
+pub fn stop_other_instances() -> usize {
+    if !other_instance_running() {
+        return 0;
+    }
+    // Only a process that runs THIS very executable is ended: a process that merely carries the
+    // name `netfreedom.exe` from another folder is not ours and is left alone.
+    let Ok(exe) = std::env::current_exe() else { return 0 };
+    let exe = exe.to_string_lossy().into_owned();
+    let (ended, skipped) = crate::sys::kill_matching("netfreedom.exe", |p| crate::safety::same_path(p, &exe));
+    if skipped > 0 {
+        crate::ui::warn(&format!("{skipped} other process(es) named netfreedom.exe run from a different file and were left alone; if the engine stays busy, close them yourself"));
+    }
+    ended
 }
 
 static ACTIVE: Mutex<Option<Native>> = Mutex::new(None);
@@ -119,6 +175,16 @@ pub fn start(bin_dir: &str, plan: Plan) -> Result<(), String> {
     if slot.is_some() {
         return Err("native engine is already running".into());
     }
+    let gname = wide(GUARD_NAME);
+    let raw = unsafe { CreateMutexW(std::ptr::null(), 1, gname.as_ptr()) };
+    if raw.is_null() {
+        return Err(format!("cannot create the engine guard (error {})", unsafe { GetLastError() }));
+    }
+    let exists = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
+    let guard = Guard(raw);
+    if exists {
+        return Err("another NetFreedom process is already running the engine (run `netfreedom stop` to end it)".into());
+    }
     let dll = wide(format!("{bin_dir}WinDivert.dll"));
     let lib = unsafe { LoadLibraryW(dll.as_ptr()) };
     if lib.is_null() {
@@ -136,6 +202,7 @@ pub fn start(bin_dir: &str, plan: Plan) -> Result<(), String> {
         close: sym!("WinDivertClose", FnClose).ok_or("WinDivertClose is missing")?,
         shutdown: sym!("WinDivertShutdown", FnShutdown),
         calc: sym!("WinDivertHelperCalcChecksums", FnCalc),
+        set_param: sym!("WinDivertSetParam", FnSetParam),
     };
     let filter = CString::new(plan.filter.as_str()).map_err(|_| "filter contains NUL")?;
     // layer 0 = WINDIVERT_LAYER_NETWORK, priority 0, flags 0
@@ -145,21 +212,46 @@ pub fn start(bin_dir: &str, plan: Plan) -> Result<(), String> {
         return Err(format!("WinDivertOpen failed (error {e}: {})", explain(e)));
     }
 
+    // A longer, larger queue: a connection start is a burst (fakes and split pieces go out
+    // while the next packets are already waiting), and a packet that sat in a full queue is
+    // dropped by the driver. 0 = QUEUE_LENGTH (default 4096, max 16384), 2 = QUEUE_SIZE (default 4 MB, max 32 MB).
+    if let Some(set) = api.set_param {
+        unsafe {
+            set(handle, 0, 16_384);
+            set(handle, 2, 16 * 1024 * 1024);
+        }
+    }
     let shared = Arc::new(Shared { api, handle });
     let io_shared = shared.clone();
     let seed = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0x9E37_79B9);
+    let engine = Arc::new(Mutex::new(Engine::new(plan.rules, seed).with_tcp(plan.tcp)));
+    let stop = Arc::new(AtomicBool::new(false));
+    let t0 = Instant::now();
+    let (eng, st) = (engine.clone(), stop.clone());
     let thread = std::thread::Builder::new()
         .name("native-engine".into())
         .spawn(move || {
             unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) };
             let mut io = WdIo(io_shared);
-            let mut engine = Engine::new(plan.rules, seed);
-            let t0 = Instant::now();
-            engine.run(&mut io, &|| t0.elapsed().as_millis() as u64);
-            engine.stats
+            crate::engine::run_shared(&eng, &mut io, &|| t0.elapsed().as_millis() as u64);
+            st.store(true, Ordering::Relaxed);
         })
         .map_err(|e| format!("cannot start the engine thread: {e}"))?;
-    *slot = Some(Native { shared, thread: Some(thread) });
+    // Timer: a ClientHello / QUIC Initial that is being collected must not wait for the next
+    // packet to be let go when its remaining part never arrives.
+    let (eng, st, fl_shared) = (engine.clone(), stop.clone(), shared.clone());
+    let flusher = std::thread::Builder::new()
+        .name("native-engine-timer".into())
+        .spawn(move || {
+            let mut io = WdIo(fl_shared);
+            while !st.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(20));
+                let now = t0.elapsed().as_millis() as u64;
+                eng.lock().unwrap_or_else(|p| p.into_inner()).flush_expired(now, &mut io);
+            }
+        })
+        .ok();
+    *slot = Some(Native { shared, thread: Some(thread), flusher, engine, stop, _guard: guard });
     Ok(())
 }
 
@@ -171,6 +263,9 @@ pub fn is_active() -> bool {
 pub fn stop() -> Option<Stats> {
     let mut n = ACTIVE.lock().ok()?.take()?;
     let s = &*n.shared;
+    // let go of whatever is being collected while sending still works
+    n.engine.lock().unwrap_or_else(|p| p.into_inner()).flush_all(&mut WdIo(n.shared.clone()));
+    n.stop.store(true, Ordering::Relaxed);
     unsafe {
         match s.api.shutdown {
             Some(sd) => {
@@ -181,9 +276,15 @@ pub fn stop() -> Option<Stats> {
             }
         }
     }
-    let stats = n.thread.take().and_then(|t| t.join().ok());
+    if let Some(t) = n.thread.take() {
+        let _ = t.join();
+    }
+    if let Some(f) = n.flusher.take() {
+        let _ = f.join();
+    }
     if s.api.shutdown.is_some() {
         unsafe { (s.api.close)(s.handle) };
     }
-    stats
+    let stats = n.engine.lock().unwrap_or_else(|p| p.into_inner()).stats;
+    Some(stats)
 }

@@ -27,10 +27,28 @@ pub fn norm(p: &str) -> String {
     s
 }
 
+/// Drops the `\\?\` prefix Windows puts on some paths, then normalises like [`norm`].
+fn plain(p: &str) -> String {
+    norm(p.strip_prefix(r"\\?\").unwrap_or(p))
+}
+
+/// True when both paths name the same file (case-insensitive, `/` = `\`, `\\?\` prefix ignored).
+pub fn same_path(a: &str, b: &str) -> bool {
+    let (a, b) = (plain(a), plain(b));
+    !a.is_empty() && a == b
+}
+
+/// True when `path` lies inside the folder `root` (on a folder boundary: `C:\Program Files X\a.exe`
+/// is not inside `C:\Program Files`). Paths with a `..` component never match.
+pub fn is_inside(path: &str, root: &str) -> bool {
+    let (p, r) = (plain(path), plain(root));
+    !r.is_empty() && !p.split('\\').any(|c| c == "..") && p.starts_with(&format!("{r}\\"))
+}
+
 /// Files that must exist for a folder to be recognised as this package.
 #[cfg(windows)]
 pub fn markers() -> &'static [&'static str] {
-    &["netfreedom.exe", "bin\\winws.exe", "bin\\windivert64.sys"]
+    &["netfreedom.exe", "bin\\windivert.dll", "bin\\windivert64.sys"]
 }
 
 /// Files that must exist for a folder to be recognised as this package.
@@ -84,6 +102,20 @@ mod tests {
         for bad in ["", "/", "C:\\", "c:", "C:\\Windows", "c:\\windows\\", "C:\\Users\\me", "C:\\Users", "C:\\Users\\me\\Desktop"] {
             assert!(unsafe_reason(bad, &prot(), &all).is_some(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn path_comparisons() {
+        assert!(same_path(r"C:\NF\netfreedom.exe", r"\\?\c:\nf\NETFREEDOM.EXE"));
+        assert!(same_path("C:/NF/netfreedom.exe", r"C:\NF\netfreedom.exe"));
+        assert!(!same_path(r"C:\NF\netfreedom.exe", r"C:\Temp\netfreedom.exe"));
+        assert!(!same_path("", ""), "an unknown path matches nothing");
+        assert!(is_inside(r"C:\Program Files\Cloudflare\x.exe", r"C:\Program Files"));
+        assert!(is_inside(r"c:\program files\x.exe", r"C:\Program Files\"));
+        assert!(!is_inside(r"C:\Program Files X\x.exe", r"C:\Program Files"), "folder boundary");
+        assert!(!is_inside(r"C:\Program Files", r"C:\Program Files"), "the folder itself is not inside itself");
+        assert!(!is_inside(r"C:\Program Files\..\Users\x.exe", r"C:\Program Files"));
+        assert!(!is_inside(r"C:\a\b.exe", ""), "an empty root matches nothing");
     }
 
     #[test]
