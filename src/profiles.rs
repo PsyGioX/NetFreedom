@@ -89,7 +89,7 @@ mod tests {
 
     #[test]
     fn table_is_complete() {
-        assert_eq!(PROFILES.len(), 7 + 29);
+        assert_eq!(PROFILES.len(), 8 + 32);
         assert!(find(DEFAULT_PROFILE).unwrap().is_dedicated_lean());
         assert!(find(DEFAULT_BYPASS).unwrap().is_bypass());
         assert!(find("BALANCED").is_some());
@@ -107,7 +107,7 @@ mod tests {
             (rep(0), rep(port))
         }
         let (q0, p0) = burst("warp");
-        for n in ["warp-esports", "warp-esports-ttl", "warp-lowburst"] {
+        for n in ["warp-esports", "warp-esports-ttl", "warp-lowburst", "warp-min"] {
             let p = find(n).unwrap();
             assert!(p.is_dedicated_lean(), "{n} is a WARP strategy");
             let (q, port) = burst(n);

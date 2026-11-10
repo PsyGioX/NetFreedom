@@ -170,7 +170,7 @@ impl Scenario {
 
 /// `--quick` for the bypass goal: the strategies that are most often the answer (about a third of
 /// the full run).
-const QUICK_BYPASS: [&str; 10] = ["balanced", "disorder", "max", "hostfake-g", "hostfake", "alt9", "alt11", "alt12", "alt13", "split"];
+const QUICK_BYPASS: [&str; 11] = ["balanced", "balanced-lite", "disorder", "max", "hostfake-g", "hostfake", "alt9", "alt11", "alt12", "alt13", "split"];
 
 /// Builds the list of scenarios for the given options (pure, unit-tested). Every strategy is unique
 /// (the table is deduplicated), so nothing is measured twice.
@@ -744,15 +744,15 @@ mod tests {
     #[test]
     fn scenario_lists_have_no_duplicates() {
         let all = scenarios(&TuneArgs::default());
-        // baseline + 7 WARP strategies + 29 bypass strategies (low latency)
-        assert_eq!(all.len(), 1 + 7 + 29);
+        // baseline + 8 WARP strategies + 32 bypass strategies (low latency)
+        assert_eq!(all.len(), 1 + 8 + 32);
         assert!(all[0].profile.is_none());
         let labels: std::collections::HashSet<_> = all.iter().map(|s| s.label.clone()).collect();
         assert_eq!(labels.len(), all.len());
-        assert_eq!(scenarios(&TuneArgs { quick: true, ..Default::default() }).len(), 1 + 7);
-        assert_eq!(scenarios(&TuneArgs { full: true, ..Default::default() }).len(), 1 + 7 + 58);
+        assert_eq!(scenarios(&TuneArgs { quick: true, ..Default::default() }).len(), 1 + 8);
+        assert_eq!(scenarios(&TuneArgs { full: true, ..Default::default() }).len(), 1 + 8 + 64);
         let b = scenarios(&TuneArgs { bypass: true, ..Default::default() });
-        assert_eq!(b.len(), 1 + 29, "bypass goal: baseline + the 29 bypass strategies, no WARP strategies");
+        assert_eq!(b.len(), 1 + 32, "bypass goal: baseline + the 32 bypass strategies, no WARP strategies");
         assert!(b.iter().skip(1).all(|s| s.bypass_goal && s.profile.unwrap().is_bypass()));
         let q = scenarios(&TuneArgs { bypass: true, quick: true, ..Default::default() });
         assert_eq!(q.len(), 1 + QUICK_BYPASS.len(), "every quick name must exist in the table");

@@ -675,7 +675,11 @@ impl Plan {
                 // the second one (zapret collects them: `reasm`). The second segment starts with
                 // arbitrary bytes, so every data segment on these ports has to be seen; a rule
                 // without a host list only needs the first segment, recognised by its header.
-                let shape = if s.include.is_some() { "tcp.PayloadLength>0" } else { "tcp.PayloadLength>=6 and tcp.Payload[0]==0x16 and tcp.Payload[5]==0x01" };
+                // Only the first segment of a hello (starts with a TLS record header) and SMALL
+                // data segments are taken: the rest of a hello is the tail left after a full-size
+                // first segment, so it never exceeds `CONT_MAX`. Bulk uploads (full-size segments
+                // of a file, a video, a sync) therefore stay in the kernel and never wake the engine.
+                let shape = if s.include.is_some() { format!("tcp.PayloadLength>0 and (tcp.Payload[0]==0x16 or tcp.PayloadLength<={CONT_MAX})") } else { "tcp.PayloadLength>=6 and tcp.Payload[0]==0x16 and tcp.Payload[5]==0x01".to_owned() };
                 clauses.push(format!("{} and {shape}", port_clause("tcp", &s.ports)));
             }
             let http_ports: Vec<(u16, u16)> = if s.l7 == L7::Http { s.ports.clone() } else { s.ports.iter().copied().filter(|&(a, b)| (a..=b).contains(&80)).map(|_| (80, 80)).collect() };
@@ -888,6 +892,10 @@ const REASM_MAX_BYTES: usize = 16 * 1024 + 5;
 /// The OS sends the segments of one write back to back, so the rest of a ClientHello follows
 /// within microseconds; anything slower is not the case this is meant for.
 const REASM_TIMEOUT_MS: u64 = 250;
+/// Largest data segment the kernel-side filter hands over besides a hello's first segment (see
+/// `Plan::from_args`). A hello is only collected when what is still missing fits into it, so the
+/// engine never waits for a segment that the filter would not deliver.
+const CONT_MAX: usize = 1200;
 const REASM_MAX_SEGMENTS: usize = 16;
 const MAX_HOLDS: usize = 256;
 /// A QUIC ClientHello needs two Initial datagrams today, three at most.
@@ -1246,7 +1254,7 @@ impl Engine {
         // host-list rule applies cannot be told yet. Keep this segment back and collect the rest.
         if l7 == L7::Tls && host.is_none() && self.reasm.len() < MAX_HOLDS {
             if let Some(total) = tls::record_total(payload) {
-                if payload.len() < total && total <= REASM_MAX_BYTES && self.tcp.iter().any(|s| !s.inert && s.could_match(t, l7)) {
+                if payload.len() < total && total <= REASM_MAX_BYTES && total - payload.len() <= CONT_MAX && self.tcp.iter().any(|s| !s.inert && s.could_match(t, l7)) {
                     self.reasm.insert(
                         FlowKey::of_tcp(t),
                         TcpReasm { held: vec![Held { pkt: pkt[..t.end].to_vec(), addr: *addr }], data: payload.to_vec(), total, seq0: t.seq, started: now, mss: payload.len(), last_flags: t.flags },
@@ -1680,7 +1688,7 @@ mod tests {
         assert!(t.fake && t.rule.split == Split::Multisplit && t.rule.seqovl == 10 && t.rule.fake_repeats == 2);
         assert!(t.rule.fool.ts && t.rule.ip_id_zero && t.include.as_ref().unwrap().contains("a.blocked.test"));
         assert!(plan.filter.contains("outbound and tcp") && plan.filter.contains("tcp.DstPort==443"));
-        assert!(plan.filter.contains("tcp.PayloadLength>0") && !plan.filter.contains("udp"), "a host-list rule needs the continuation segments too: {}", plan.filter);
+        assert!(plan.filter.contains("tcp.PayloadLength>0") && plan.filter.contains("tcp.PayloadLength<=1200") && !plan.filter.contains("udp"), "a host-list rule needs the continuation segments too, but not bulk data: {}", plan.filter);
         let plain = Plan::from_args(&s(&["--filter-tcp=443", "--ipset=IPS", "--dpi-desync=multisplit", "--dpi-desync-split-pos=1"]), &tcp_reader).unwrap();
         assert!(plain.filter.contains("tcp.Payload[0]==0x16") && !plain.filter.contains("tcp.PayloadLength>0"), "{}", plain.filter);
     }
@@ -2086,6 +2094,23 @@ mod tests {
         assert_eq!(stream_of(real, 5000, ch.len()), ch, "the server reassembles the whole hello");
         assert_eq!(crate::tcp::parse_tcp(&io.sent[2]).unwrap().seq, 4990, "seqovl in front of the first piece");
         assert_eq!((e.stats.desynced, e.stats.reassembled, e.stats.passed), (1, 1, 0));
+    }
+
+    /// The kernel-side filter hands over data segments of at most `CONT_MAX` bytes (besides a hello's
+    /// first segment). A hello whose missing part is bigger would never be completed, so it must not
+    /// be held at all: the first segment leaves at once instead of after the 250 ms timeout.
+    #[test]
+    fn a_hello_whose_tail_the_filter_would_not_deliver_is_not_held() {
+        use crate::tcp::tests::mk4;
+        let ch = late_hello("www.blocked.test");
+        let (a, _) = ch.split_at(ch.len() - (CONT_MAX + 100));
+        let plan = Plan::from_args(&tls_args(), &tcp_reader).unwrap();
+        let mut e = Engine::new(Vec::new(), 5).with_tcp(plan.tcp);
+        let mut io = Mock::default();
+        let pa = mk4(5000, 7, a);
+        e.handle(&pa, &Addr::default(), 0, &mut io);
+        assert_eq!(io.sent, vec![pa], "nothing to wait for: sent unchanged at once");
+        assert_eq!(e.stats.reassembled, 0);
     }
 
     #[test]

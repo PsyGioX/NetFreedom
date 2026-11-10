@@ -256,6 +256,26 @@ LEGACY = {
 }
 TECH.update(LEGACY)
 TECH.update({
+    # Lighter than `fakesplit`: 3 fake ClientHellos instead of 8. Every new TLS connection pays for
+    # its fakes on the uplink, and a page opens dozens of them; if this one works on a provider it
+    # is the one that opens pages quicker.
+    "fakesplit-lite": [
+        "--dpi-desync=fake,multisplit", "--dpi-desync-split-seqovl=681", "--dpi-desync-split-pos=1",
+        "--dpi-desync-fooling=ts", "--dpi-desync-repeats=3",
+        f"--dpi-desync-split-seqovl-pattern={GOOGLE_TLS}", MOD("www.google.com"),
+    ],
+    # 16 KB freeze on Cloudflare/Hetzner/OVH/...: TSPU lets a connection through only if it reads a
+    # whitelisted host name in it (ntc.party, 2026). A fake host name from the domestic whitelist is
+    # put in front of the real one; `ts,md5sig` make the server ignore it. Different names, because
+    # which ones a given operator's whitelist accepts differs.
+    "hostfake-vk": [
+        "--dpi-desync=hostfakesplit", "--dpi-desync-fooling=ts,md5sig",
+        "--dpi-desync-hostfakesplit-mod=host=vk.com", "--dpi-desync-repeats=4",
+    ],
+    "hostfake-gu": [
+        "--dpi-desync=hostfakesplit", "--dpi-desync-fooling=ts,md5sig",
+        "--dpi-desync-hostfakesplit-mod=host=gosuslugi.ru", "--dpi-desync-repeats=4",
+    ],
     # variations around the family that worked in a real tune report (fake + disorder/dsplit + ts)
     "disorder-sni": [
         "--dpi-desync=fake,multidisorder", "--dpi-desync-split-pos=1,sniext+1",
@@ -281,7 +301,7 @@ HTTP_RULE = ["--dpi-desync=fake,multisplit", "--dpi-desync-split-pos=method+2", 
 
 # Our own techniques that send fake packets. Only these get the extra googlevideo rule below: the
 # proven original strategies are kept verbatim, and the split-only ones must stay free of fakes.
-GV_TECHS = {"fakesplit", "disorder", "max", "disorder-sni", "disorder-ya", "fdisorder", "ttl", "seqfake"}
+GV_TECHS = {"fakesplit", "fakesplit-lite", "disorder", "max", "disorder-sni", "disorder-ya", "fdisorder", "ttl", "seqfake"}
 
 # YouTube video comes from googlevideo.com. On some providers (MGTS, Rostelecom in autumn 2026) the
 # page opens while TLS to googlevideo.com never completes with ANY of the general techniques; a
@@ -375,11 +395,16 @@ STRATEGIES = [
      None, lean(quic(3), 4, 2)),
     ("warp-esports-ttl", "WARP handshake only, 3 fakes that expire after 5 hops (TTL 5)",
      None, lean(quic(3), 4, 2, extra=["--dpi-desync-ttl=5"])),
+    ("warp-min", "WARP handshake only, 2 fake Initials and 100-byte port fakes: the smallest burst",
+     None, lean(quic(2), 3, 2, port_fake="{BIN}stun.bin")),
     ("warp-lowburst", "WARP handshake only, 4 fake Initials; port rules use a 100-byte fake instead of 1250 bytes",
      None, lean(quic(4), 6, 2, port_fake="{BIN}stun.bin")),
 ]
 BYPASS = [
     ("balanced", "fake + overlapping split with a harmless SNI (good first try)", "fakesplit", 6),
+    ("balanced-lite", "like balanced with 3 fakes and 3 QUIC fakes: less uplink burst per connection", "fakesplit-lite", 3),
+    ("hostfake-vk", "16 KB freeze: fake host vk.com in front of the real one (ts+md5sig)", "hostfake-vk", 6),
+    ("hostfake-gu", "16 KB freeze: fake host gosuslugi.ru in front of the real one (ts+md5sig)", "hostfake-gu", 6),
     ("disorder", "fake + out-of-order segments (worked in field tests)", "disorder", 11),
     ("max", "fake + fakedsplit, 11 repeats (worked in field tests)", "max", 11),
     ("disorder-sni", "fake + out-of-order, split at the SNI extension", "disorder-sni", 6),
