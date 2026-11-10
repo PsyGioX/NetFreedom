@@ -20,7 +20,7 @@
 
 const MAX_CID: usize = 20;
 
-pub(crate) fn draft_version(v: u32) -> u8 {
+fn draft_version(v: u32) -> u8 {
     if v >> 8 == 0x00ff_0000 {
         return v as u8;
     }
@@ -35,12 +35,12 @@ pub(crate) fn draft_version(v: u32) -> u8 {
     }
 }
 
-pub(crate) fn is_v2(v: u32) -> bool {
+fn is_v2(v: u32) -> bool {
     v == 0x709A_50C4 || v == 0x6b33_43cf
 }
 
 /// QUIC variable-length integer at `d[off..]`: (value, encoded size).
-pub(crate) fn varint(d: &[u8], off: usize) -> Option<(u64, usize)> {
+fn varint(d: &[u8], off: usize) -> Option<(u64, usize)> {
     let first = *d.get(off)?;
     let size = 1usize << (first >> 6);
     let b = d.get(off..off + size)?;

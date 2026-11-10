@@ -42,8 +42,11 @@ pub struct StartArgs {
     pub mode: Option<u8>,
     pub tcp: Option<String>,
     pub udp: Option<String>,
+    pub show_winws: bool,
     pub no_probe: bool,
     pub verbose: bool,
+    /// Experimental: run the packet engine inside this process instead of winws.exe.
+    pub native: bool,
     /// No WARP: the strategy unblocks sites directly.
     pub bypass: bool,
     /// No prompts: run until stopped (autostart, services).
@@ -69,9 +72,9 @@ impl StartArgs {
                 }
                 "--tcp" => a.tcp = Some(value("--tcp")?),
                 "--udp" => a.udp = Some(value("--udp")?),
-                // accepted so that old shortcuts keep working; there is no separate engine window now
-                "--show-winws" | "--native" => {}
+                "--show-winws" => a.show_winws = true,
                 "--no-probe" => a.no_probe = true,
+                "--native" => a.native = true,
                 "--bypass" => a.bypass = true,
                 "--headless" => a.headless = true,
                 "--dns" => {
@@ -201,7 +204,7 @@ fn select(cfg: &mut Config, a: &StartArgs) -> Result<Plan, String> {
 }
 
 /// Starts the packet engine for `plan`. `quiet` suppresses progress lines (used by `tune`).
-pub fn launch(layout: &Layout, plan: &Plan, a: &StartArgs, quiet: bool) -> Result<(), String> {
+pub fn launch(layout: &Layout, plan: &Plan, a: &StartArgs, use_native: bool, quiet: bool) -> Result<(), String> {
     let tpl = if plan.lean { plan.profile.lean } else { plan.profile.classic }
         .ok_or_else(|| format!("strategy \"{}\" has no such variant", plan.profile.name))?;
     let (tcp, udp) = plan.gf.effective();
@@ -222,7 +225,20 @@ pub fn launch(layout: &Layout, plan: &Plan, a: &StartArgs, quiet: bool) -> Resul
         println!("engine arguments: {}", args.iter().map(|s| format!("\"{s}\"")).collect::<Vec<_>>().join(" "));
     }
 
-    backend::start(layout, &args)?;
+    if use_native && plan.lean {
+        match backend::native_try(layout, &args) {
+            Ok(true) => {
+                if !quiet {
+                    println!("Native engine is running inside this process (EXPERIMENTAL: no winws.exe, no Cygwin).");
+                }
+                return Ok(());
+            }
+            Ok(false) => {}
+            Err(e) => ui::warn(&format!("native engine unavailable: {e}\n         falling back to the normal engine")),
+        }
+    }
+
+    backend::start(layout, &args, a.show_winws)?;
     if !quiet {
         println!("The packet engine is running.");
     }
@@ -371,8 +387,9 @@ pub fn start(layout: &Layout, a: StartArgs) -> Result<(), String> {
 
     let mut compat_tried = !plan.lean && plan.mode == 2;
 
+    let mut use_native = a.native;
     let connected = loop {
-        launch(layout, &plan, &a, false)?;
+        launch(layout, &plan, &a, use_native, false)?;
         sys::arm_cleanup(true);
 
         // Daemon check and (first run) registration talk to Cloudflare, so they come AFTER the
@@ -413,7 +430,21 @@ pub fn start(layout: &Layout, a: StartArgs) -> Result<(), String> {
             // nobody to ask: keep what is running, the watchdog keeps trying to reconnect
             break false;
         }
-        if !compat_tried {
+        if backend::native_active() {
+            match ui::choice(tr("[W] повторить через winws.exe, [C] продолжить, [Q] остановить всё: ", "[W] retry with winws.exe, [C] continue anyway, [Q] stop everything: "), "WCQ") {
+                'Q' => {
+                    cleanup_verbose(true);
+                    return Ok(());
+                }
+                'C' => break false,
+                _ => {
+                    use_native = false;
+                    warp.disconnect();
+                    backend::native_stop();
+                    backend::stop_all();
+                }
+            }
+        } else if !compat_tried {
             println!("{}", tr("Режим совместимости перехватывает все порты и может помочь в строгих сетях.", "Compatibility mode captures all ports and may help on strict networks."));
             match ui::choice(tr("[R] повторить в режиме совместимости, [C] продолжить, [Q] остановить всё: ", "[R] retry in Compatibility mode, [C] continue anyway, [Q] stop everything: "), "RCQ") {
                 'Q' => {
@@ -445,7 +476,7 @@ pub fn start(layout: &Layout, a: StartArgs) -> Result<(), String> {
     }
     apply_dns(layout, &cfg, Mode::Warp);
 
-    session::begin(Active { mode: Mode::Warp, plan, layout: layout.clone(), started: Instant::now(), target });
+    session::begin(Active { mode: Mode::Warp, plan, layout: layout.clone(), native: use_native, started: Instant::now(), target });
     sys::arm_cleanup(true);
 
     if a.headless {
@@ -501,7 +532,7 @@ fn start_bypass(layout: &Layout, a: StartArgs) -> Result<(), String> {
     let _ = cfg.save(&layout.cfg);
     let target = watch_target(&cfg);
 
-    launch(layout, &plan, &a, false)?;
+    launch(layout, &plan, &a, false, false)?;
     sys::arm_cleanup(true);
     apply_dns(layout, &cfg, Mode::Bypass);
 
@@ -518,7 +549,7 @@ fn start_bypass(layout: &Layout, a: StartArgs) -> Result<(), String> {
             ui::warn("curl was not found, so the result was not checked.");
         }
     }
-    session::begin(Active { mode: Mode::Bypass, plan, layout: layout.clone(), started: Instant::now(), target });
+    session::begin(Active { mode: Mode::Bypass, plan, layout: layout.clone(), native: false, started: Instant::now(), target });
     if !first.is_empty() {
         session::with_health(|h| {
             h.web = first;

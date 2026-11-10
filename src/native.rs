@@ -18,7 +18,7 @@
 //! WinDivert binding for the native engine (EXPERIMENTAL, opt-in via `--native`).
 //!
 //! `WinDivert.dll` is loaded at run time from `bin\` (the DLL looks for `WinDivert64.sys` next to
-//! itself), so nothing is linked statically.
+//! itself), so nothing is linked statically and the same files shipped for winws are reused.
 
 use std::ffi::{c_void, CString};
 use std::sync::{Arc, Mutex};
@@ -27,7 +27,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
-use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentThread, OpenMutexW, OpenProcess, SetThreadPriority, TerminateProcess, PROCESS_TERMINATE, THREAD_PRIORITY_HIGHEST};
+use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST};
 
 use crate::engine::{Addr, Engine, PacketIo, Plan, Stats};
 use crate::sys::wide;
@@ -97,63 +97,6 @@ impl PacketIo for WdIo {
 pub struct Native {
     shared: Arc<Shared>,
     thread: Option<JoinHandle<Stats>>,
-    /// Held while the engine runs: a second process must not open WinDivert again (every fake
-    /// would go out twice). Windows releases it when the process ends, however it ends.
-    _guard: Guard,
-}
-
-/// The engine mutex; closing it (also on every early return of `start`) frees the name.
-struct Guard(HANDLE);
-
-impl Drop for Guard {
-    fn drop(&mut self) {
-        unsafe { CloseHandle(self.0) };
-    }
-}
-
-// the handle is only used to close it
-unsafe impl Send for Guard {}
-
-/// Machine-wide name of the "an engine is running" mutex.
-const GUARD_NAME: &str = "Global\\NetFreedomEngine";
-const SYNCHRONIZE: u32 = 0x0010_0000;
-
-/// Is the engine of *another* NetFreedom process running?
-pub fn other_instance_running() -> bool {
-    if is_active() {
-        return false;
-    }
-    let name = wide(GUARD_NAME);
-    let h = unsafe { OpenMutexW(SYNCHRONIZE, 0, name.as_ptr()) };
-    if h.is_null() {
-        return false;
-    }
-    unsafe { CloseHandle(h) };
-    true
-}
-
-/// Ends the other NetFreedom processes that hold the engine (their handle closes with them).
-/// Returns how many were ended.
-pub fn stop_other_instances() -> usize {
-    if !other_instance_running() {
-        return 0;
-    }
-    let me = std::process::id();
-    let mut n = 0;
-    for pid in crate::sys::pids_by_name("netfreedom.exe") {
-        if pid != me {
-            unsafe {
-                let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
-                if !h.is_null() {
-                    if TerminateProcess(h, 1) != 0 {
-                        n += 1;
-                    }
-                    CloseHandle(h);
-                }
-            }
-        }
-    }
-    n
 }
 
 static ACTIVE: Mutex<Option<Native>> = Mutex::new(None);
@@ -175,16 +118,6 @@ pub fn start(bin_dir: &str, plan: Plan) -> Result<(), String> {
     let mut slot = ACTIVE.lock().map_err(|_| "poisoned lock")?;
     if slot.is_some() {
         return Err("native engine is already running".into());
-    }
-    let gname = wide(GUARD_NAME);
-    let raw = unsafe { CreateMutexW(std::ptr::null(), 1, gname.as_ptr()) };
-    if raw.is_null() {
-        return Err(format!("cannot create the engine guard (error {})", unsafe { GetLastError() }));
-    }
-    let exists = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
-    let guard = Guard(raw);
-    if exists {
-        return Err("another NetFreedom process is already running the engine (run `netfreedom stop` to end it)".into());
     }
     let dll = wide(format!("{bin_dir}WinDivert.dll"));
     let lib = unsafe { LoadLibraryW(dll.as_ptr()) };
@@ -220,13 +153,13 @@ pub fn start(bin_dir: &str, plan: Plan) -> Result<(), String> {
         .spawn(move || {
             unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) };
             let mut io = WdIo(io_shared);
-            let mut engine = Engine::new(plan.rules, seed).with_tcp(plan.tcp);
+            let mut engine = Engine::new(plan.rules, seed);
             let t0 = Instant::now();
             engine.run(&mut io, &|| t0.elapsed().as_millis() as u64);
             engine.stats
         })
         .map_err(|e| format!("cannot start the engine thread: {e}"))?;
-    *slot = Some(Native { shared, thread: Some(thread), _guard: guard });
+    *slot = Some(Native { shared, thread: Some(thread) });
     Ok(())
 }
 

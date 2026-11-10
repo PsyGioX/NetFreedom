@@ -19,13 +19,13 @@
 name = "netfreedom"
 version = "3.3.0"
 edition = "2021"
-description = "NetFreedom - open, local, reversible tool for reaching the open Internet from Russia: DPI-bypass strategies, Cloudflare WARP and game-aware tuning"
+description = "NetFreedom - open, local, reversible tool for reaching the open Internet from Russia: zapret strategies, Cloudflare WARP and game-aware tuning"
 license = "GPL-3.0-only"
 authors = ["Sergey (PsyGioX) <https://github.com/PsyGioX>"]
 repository = "https://github.com/PsyGioX/NetFreedom"
 homepage = "https://github.com/PsyGioX/NetFreedom"
 readme = "README.md"
-keywords = ["dpi", "cloudflare-warp", "windivert", "nfqws"]
+keywords = ["zapret", "dpi", "cloudflare-warp", "winws", "nfqws"]
 build = "build.rs"
 
 [lib]

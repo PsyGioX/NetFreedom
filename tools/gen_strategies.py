@@ -335,13 +335,13 @@ def classic(tech, r_quic):
     return flatten(segs, head)
 
 
-def lean(quic_args, port_repeats, port_cutoff, extra=(), port_fake=ACTIVE_UDP):
+def lean(quic_args, port_repeats, port_cutoff, extra=()):
     """WARP handshake only: IP-range raw filter, no list files, nothing else is touched."""
     segs = [
         ["--filter-udp=443", *quic_args, *extra],
         ["--filter-udp=500,1701,4443,4500,8095,8443", "--dpi-desync=fake", f"--dpi-desync-repeats={port_repeats}",
          "--dpi-desync-any-protocol=1", f"--dpi-desync-cutoff=n{port_cutoff}",
-         f"--dpi-desync-fake-unknown-udp={port_fake}", *extra],
+         f"--dpi-desync-fake-unknown-udp={ACTIVE_UDP}", *extra],
     ]
     return flatten(segs, ["--wf-raw={WFRAW}"])
 
@@ -367,16 +367,6 @@ STRATEGIES = [
     ("warp-mix", "WARP handshake only, two different fake Initials per attempt",
      None, lean(["--dpi-desync=fake", "--dpi-desync-repeats=8", f"--dpi-desync-fake-quic={GOOGLE_QUIC}",
                  "--dpi-desync-fake-quic={BIN}quic_initial_rutube_ru.bin"], 12, 3)),
-    # Competitive games. The strategy only runs while a connection is being set up (and when WARP
-    # re-handshakes), never on game packets, so what it can change is the size of the burst that
-    # leaves your uplink at that moment: a burst of N x 1.2 KB fakes occupies a slow uplink for
-    # N x 2 ms (at 5 Mbit/s) and shows up as a jitter spike. These three trade fakes for burst.
-    ("warp-esports", "WARP handshake only, 3 fake Initials: about a third of the burst of the default",
-     None, lean(quic(3), 4, 2)),
-    ("warp-esports-ttl", "WARP handshake only, 3 fakes that expire after 5 hops (TTL 5)",
-     None, lean(quic(3), 4, 2, extra=["--dpi-desync-ttl=5"])),
-    ("warp-lowburst", "WARP handshake only, 4 fake Initials; port rules use a 100-byte fake instead of 1250 bytes",
-     None, lean(quic(4), 6, 2, port_fake="{BIN}stun.bin")),
 ]
 BYPASS = [
     ("balanced", "fake + overlapping split with a harmless SNI (good first try)", "fakesplit", 6),

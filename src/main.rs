@@ -37,11 +37,11 @@ use nf::uninstall;
 const HELP: &str = "\
 NetFreedom - an open, local, reversible way to reach the open Internet
 Games through Cloudflare WARP, or direct bypass of blocks (YouTube, Discord, Cloudflare sites).
-Windows: built-in engine + WinDivert driver.  Linux: nfqws + nftables.
+Windows: winws + WinDivert.  Linux: nfqws + nftables.
 
 USAGE
   netfreedom                          interactive menu
-  netfreedom start [options]          games: the engine protects the WARP handshake, WARP carries the traffic
+  netfreedom start [options]          games: zapret protects the WARP handshake, WARP carries the traffic
   netfreedom start --bypass [options] no WARP: unblock sites, YouTube and Discord directly
   netfreedom tune [--bypass]          measure EVERY strategy on your connection and pick the best
   netfreedom stop                     emergency stop (WARP and the packet engine)
@@ -69,7 +69,9 @@ START OPTIONS
       --bypass           no WARP
       --dns <name>       encrypted DNS for this session: cloudflare, google, quad9, auto (fastest) or off; remembered
       --headless         no prompts, run until stopped (used by autostart)
+      --show-winws       show the winws console window (Windows)
       --no-probe         skip the quick check after start
+      --native           EXPERIMENTAL (Windows): packet engine inside this process, WARP strategies only
   -v, --verbose          print the engine command line
 
 TUNE OPTIONS

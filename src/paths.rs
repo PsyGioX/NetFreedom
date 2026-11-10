@@ -54,6 +54,10 @@ impl Layout {
         }
     }
 
+    pub fn winws_exe(&self) -> PathBuf {
+        PathBuf::from(&self.bin).join("winws.exe")
+    }
+
     /// Linux: `nfqws` from `bin/`, `bin/<zapret platform dir>/` or PATH.
     #[cfg(unix)]
     pub fn nfqws_exe(&self) -> Option<PathBuf> {

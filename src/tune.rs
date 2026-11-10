@@ -178,7 +178,7 @@ pub fn scenarios(a: &TuneArgs) -> Vec<Scenario> {
     let wanted = |p: &Profile| a.only.is_empty() || a.only.iter().any(|o| p.name.to_lowercase().contains(o));
     let mut v = Vec::new();
     if !a.no_baseline && a.only.is_empty() {
-        let label = if a.bypass { "no bypass (baseline)" } else { "plain WARP (no bypass)" };
+        let label = if a.bypass { "no bypass (baseline)" } else { "plain WARP (no zapret)" };
         v.push(Scenario { label: label.into(), profile: None, mode: 0, penalty: 0.0, bypass_goal: a.bypass });
     }
     for p in profiles::PROFILES.iter().filter(|p| wanted(p)) {
@@ -254,7 +254,7 @@ fn evaluate(layout: &Layout, warp: Option<&Warp>, sc: &Scenario, a: &TuneArgs, c
     teardown(warp);
 
     if let Some(plan) = sc.plan() {
-        if let Err(e) = run::launch(layout, &plan, &StartArgs::default(), true) {
+        if let Err(e) = run::launch(layout, &plan, &StartArgs::default(), false, true) {
             r.note = format!("engine failed: {}", e.lines().next().unwrap_or(""));
             teardown(warp);
             return r;
@@ -531,7 +531,7 @@ pub fn run(layout: &Layout, mut a: TuneArgs) -> Result<(), String> {
             match cand {
                 Some(sc) => {
                     let Some(plan) = sc.plan() else { continue };
-                    if let Err(e) = run::launch(layout, &plan, &StartArgs::default(), true) {
+                    if let Err(e) = run::launch(layout, &plan, &StartArgs::default(), false, true) {
                         println!("  {}: engine failed: {}", sc.label, e.lines().next().unwrap_or(""));
                         continue;
                     }
@@ -664,7 +664,7 @@ pub fn run(layout: &Layout, mut a: TuneArgs) -> Result<(), String> {
         let broke_all = results.iter().filter(|r| r.scenario.profile.is_some() && r.connected).count() == 0;
         if broke_all && base.is_some_and(|b| b.connected) {
             println!("Every strategy opened LESS than no bypass at all. That points at the engine, not at the sites:");
-            println!("check antivirus/firewall (WinDivert is a kernel driver), and try `netfreedom start --bypass -v`.");
+            println!("check utils/winws.log, antivirus/firewall, and try `netfreedom start --bypass --show-winws -v`.");
         }
     }
     if a.bypass && !a.skip_sites.is_empty() {
@@ -704,9 +704,9 @@ pub fn run(layout: &Layout, mut a: TuneArgs) -> Result<(), String> {
             println!("Nothing is blocked right now: no bypass is needed. If sites stop opening later, run this again.");
         }
         None => {
-            println!("Plain WARP is the best result: your provider does not seem to block the WARP handshake, so a bypass is not needed.");
+            println!("Plain WARP is the best result: your provider does not seem to block the WARP handshake, so zapret is not needed.");
             if let Some(alt) = results.iter().find(|r| r.scenario.profile.is_some() && r.score.is_finite()) {
-                println!("Best with a bypass (use only if WARP stops connecting later): {}  ->  {}", alt.scenario.label, alt.scenario.command());
+                println!("Best with zapret (use only if WARP stops connecting later): {}  ->  {}", alt.scenario.label, alt.scenario.command());
             }
         }
         Some(p) => {
@@ -744,13 +744,13 @@ mod tests {
     #[test]
     fn scenario_lists_have_no_duplicates() {
         let all = scenarios(&TuneArgs::default());
-        // baseline + 7 WARP strategies + 29 bypass strategies (low latency)
-        assert_eq!(all.len(), 1 + 7 + 29);
+        // baseline + 4 WARP strategies + 29 bypass strategies (low latency)
+        assert_eq!(all.len(), 1 + 4 + 29);
         assert!(all[0].profile.is_none());
         let labels: std::collections::HashSet<_> = all.iter().map(|s| s.label.clone()).collect();
         assert_eq!(labels.len(), all.len());
-        assert_eq!(scenarios(&TuneArgs { quick: true, ..Default::default() }).len(), 1 + 7);
-        assert_eq!(scenarios(&TuneArgs { full: true, ..Default::default() }).len(), 1 + 7 + 58);
+        assert_eq!(scenarios(&TuneArgs { quick: true, ..Default::default() }).len(), 1 + 4);
+        assert_eq!(scenarios(&TuneArgs { full: true, ..Default::default() }).len(), 1 + 4 + 58);
         let b = scenarios(&TuneArgs { bypass: true, ..Default::default() });
         assert_eq!(b.len(), 1 + 29, "bypass goal: baseline + the 29 bypass strategies, no WARP strategies");
         assert!(b.iter().skip(1).all(|s| s.bypass_goal && s.profile.unwrap().is_bypass()));

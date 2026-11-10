@@ -15,8 +15,9 @@
 // You should have received a copy of the GNU General Public License along with
 // this program. If not, see <https://www.gnu.org/licenses/>.
 
-//! One interface over the two engines: the built-in one on the WinDivert driver (Windows) and
-//! nfqws + nftables (Linux).
+//! One interface over the two engines: winws + WinDivert (Windows) and nfqws + nftables (Linux).
+
+use std::time::Duration;
 
 use crate::paths::Layout;
 
@@ -27,17 +28,15 @@ pub enum Outcome {
     Failed(String),
 }
 
-/// Is everything the engine needs there?
+/// Is the engine binary there?
 pub fn check_engine(layout: &Layout) -> Result<(), String> {
     #[cfg(windows)]
     {
-        for f in ["WinDivert.dll", "WinDivert64.sys"] {
-            let p = std::path::PathBuf::from(&layout.bin).join(f);
-            if !p.is_file() {
-                return Err(format!("{} not found: keep the executable next to the bin\\ and lists\\ folders.", p.display()));
-            }
+        if layout.winws_exe().is_file() {
+            Ok(())
+        } else {
+            Err(format!("{} not found: keep the executable next to the bin\\ and lists\\ folders.", layout.winws_exe().display()))
         }
-        Ok(())
     }
     #[cfg(unix)]
     {
@@ -45,28 +44,23 @@ pub fn check_engine(layout: &Layout) -> Result<(), String> {
     }
 }
 
-/// Last lines of the engine's own output (nfqws log on Linux), for failure messages. The Windows
-/// engine reports its errors directly, so there is no log to read.
+/// Is an engine of ours already running (so that a second start must be refused)?
+/// Last lines of the engine's own output (winws.log / nfqws log), for failure messages.
 pub fn engine_log_tail(layout: &Layout, lines: usize) -> String {
-    let _ = layout;
-    #[cfg(unix)]
-    {
-        let text = std::fs::read_to_string(crate::nfqws::log_path()).unwrap_or_default();
-        let all: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-        all[all.len().saturating_sub(lines)..].join(" | ")
-    }
     #[cfg(windows)]
-    {
-        let _ = lines;
-        String::new()
-    }
+    let path = layout.utils.join("winws.log");
+    #[cfg(unix)]
+    let path = crate::nfqws::log_path();
+    let _ = layout;
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let all: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    all[all.len().saturating_sub(lines)..].join(" | ")
 }
 
-/// Is an engine of ours already running (so that a second start must be refused)?
 pub fn engine_running() -> bool {
     #[cfg(windows)]
     {
-        crate::native::is_active() || crate::native::other_instance_running()
+        crate::sys::is_running("winws.exe")
     }
     #[cfg(unix)]
     {
@@ -74,22 +68,25 @@ pub fn engine_running() -> bool {
     }
 }
 
-/// Windows classic profiles rely on TCP timestamps (the `ts` fooling); nothing to do on Linux.
+/// Windows classic profiles rely on TCP timestamps; nothing to do on Linux.
 pub fn prepare_classic() {
     #[cfg(windows)]
-    crate::windivert::enable_tcp_timestamps();
+    crate::winws::enable_tcp_timestamps();
 }
 
-/// Starts the engine for an expanded profile command line and returns when it is ready. On
-/// Windows a strategy the engine cannot run exactly is an error with the reason, not a fallback.
-pub fn start(layout: &Layout, args: &[String]) -> Result<(), String> {
+/// Starts the engine for an expanded profile command line and returns when it is ready.
+pub fn start(layout: &Layout, args: &[String], show_console: bool) -> Result<(), String> {
     #[cfg(windows)]
     {
-        let plan = crate::engine::Plan::from_args(args, &|p| std::fs::read(p)).map_err(|e| format!("this strategy cannot run on the built-in engine: {e}"))?;
-        crate::native::start(&layout.bin, plan)
+        let mut child = crate::winws::spawn(layout, args, show_console).map_err(|e| format!("cannot start winws.exe: {e}"))?;
+        if !crate::winws::wait_ready(&mut child, Duration::from_secs(3)) {
+            return Err("winws.exe did not start. Check antivirus and WinDivert, then try another profile.".into());
+        }
+        Ok(())
     }
     #[cfg(unix)]
     {
+        let _ = (show_console, Duration::ZERO);
         crate::nfqws::start(layout, args, false)
     }
 }
@@ -99,7 +96,7 @@ pub fn stop_all() -> Vec<(String, Outcome)> {
     #[cfg(windows)]
     {
         use crate::sys::Removal;
-        crate::windivert::remove_services()
+        crate::winws::remove_services()
             .into_iter()
             .map(|(n, r)| {
                 let o = match r {
@@ -114,6 +111,23 @@ pub fn stop_all() -> Vec<(String, Outcome)> {
     #[cfg(unix)]
     {
         crate::nfqws::stop_all()
+    }
+}
+
+// ---- experimental in-process engine (Windows only) ----------------------------------------
+
+/// `Ok(true)`: native engine started; `Ok(false)`: not applicable, use the normal engine.
+pub fn native_try(layout: &Layout, args: &[String]) -> Result<bool, String> {
+    #[cfg(windows)]
+    {
+        let plan = crate::engine::Plan::from_args(args, &|p| std::fs::read(p))?;
+        crate::native::start(&layout.bin, plan)?;
+        Ok(true)
+    }
+    #[cfg(unix)]
+    {
+        let _ = (layout, args);
+        Err("the native engine exists on Windows only (on Linux nfqws is used)".into())
     }
 }
 

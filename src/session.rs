@@ -48,6 +48,7 @@ pub struct Active {
     pub mode: Mode,
     pub plan: Plan,
     pub layout: Layout,
+    pub native: bool,
     pub started: Instant,
     /// Host whose latency is watched.
     pub target: String,

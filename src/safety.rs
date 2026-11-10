@@ -30,7 +30,7 @@ pub fn norm(p: &str) -> String {
 /// Files that must exist for a folder to be recognised as this package.
 #[cfg(windows)]
 pub fn markers() -> &'static [&'static str] {
-    &["netfreedom.exe", "bin\\windivert.dll", "bin\\windivert64.sys"]
+    &["netfreedom.exe", "bin\\winws.exe", "bin\\windivert64.sys"]
 }
 
 /// Files that must exist for a folder to be recognised as this package.
