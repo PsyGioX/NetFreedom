@@ -30,7 +30,7 @@ use crate::sys::{self, KeyDelete, Removal};
 use crate::ui;
 use crate::util::extract_guid;
 use crate::warp::Warp;
-use crate::winws;
+use crate::windivert;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -179,7 +179,7 @@ pub fn run(layout: &Layout) -> Result<(), String> {
     println!("================================================================\n");
     println!("This will:");
     println!("  - disconnect Cloudflare WARP and close its window");
-    println!("  - stop winws.exe");
+    println!("  - stop a leftover winws.exe from older versions");
     println!("  - remove services zapret, WinDivert, WinDivert14 and their registry keys");
     println!("  - remove temporary leftovers and Defender exclusions for this folder");
     println!("  - list custom hosts-file entries for manual review (hosts is NOT edited)\n");
@@ -205,7 +205,7 @@ pub fn run(layout: &Layout) -> Result<(), String> {
 
     println!();
     let rm_warp = ui::yes_no("Also UNINSTALL Cloudflare WARP itself?");
-    println!("\nzapret turns TCP timestamps on. The Windows default is off.");
+    println!("\nNetFreedom turns TCP timestamps on (the `ts` fooling needs them). The Windows default is off.");
     let revert_ts = ui::yes_no("Set TCP timestamps back to the Windows default?");
 
     println!();
@@ -236,7 +236,7 @@ pub fn run(layout: &Layout) -> Result<(), String> {
     }
     sys::kill_by_name("Cloudflare WARP.exe");
 
-    println!("[2/8] zapret process");
+    println!("[2/8] leftover winws process (older versions)");
     if sys::kill_by_name("winws.exe") > 0 {
         ui::ok("winws.exe stopped");
     } else {
@@ -245,7 +245,7 @@ pub fn run(layout: &Layout) -> Result<(), String> {
 
     println!("[3/8] Services");
     crate::maint::disable_autostart(); // the logon task, if autostart was enabled
-    for (name, r) in winws::remove_services() {
+    for (name, r) in windivert::remove_services() {
         match r {
             Removal::Removed => ui::ok(&format!("{name} removed")),
             Removal::NotInstalled => ui::skip(&format!("{name} is not registered")),
@@ -254,7 +254,7 @@ pub fn run(layout: &Layout) -> Result<(), String> {
     }
 
     println!("[4/8] Registry leftovers");
-    for name in winws::SERVICES {
+    for name in windivert::SERVICES {
         match sys::delete_service_key(name) {
             KeyDelete::Absent => {}
             KeyDelete::Deleted => ui::ok(&format!("{name} key deleted")),
@@ -278,7 +278,7 @@ pub fn run(layout: &Layout) -> Result<(), String> {
 
     println!("[6/8] TCP timestamps");
     if revert_ts {
-        if winws::disable_tcp_timestamps() {
+        if windivert::disable_tcp_timestamps() {
             ui::ok("TCP timestamps set to the Windows default");
         } else {
             ui::warn("could not change TCP timestamps");
@@ -307,7 +307,7 @@ pub fn run(layout: &Layout) -> Result<(), String> {
         ui::warn("winws.exe is still running");
         problems += 1;
     }
-    for name in winws::SERVICES {
+    for name in windivert::SERVICES {
         if sys::service_state(name) != sys::SvcState::NotInstalled {
             ui::warn(&format!("service {name} is still registered"));
             problems += 1;

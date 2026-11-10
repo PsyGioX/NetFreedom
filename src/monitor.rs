@@ -168,7 +168,7 @@ fn watchdog(a: &Active) {
                 if Instant::now() >= next_engine_try && tried < MAX_ENGINE_RESTARTS && !session::stopping() {
                     next_engine_try = Instant::now() + Duration::from_secs(10);
                     session::with_health(|h| h.engine_restarts += 1);
-                    match run::launch(&a.layout, &a.plan, &StartArgs::default(), a.native, true) {
+                    match run::launch(&a.layout, &a.plan, &StartArgs::default(), true) {
                         Ok(()) => {
                             engine_up = true;
                             session::event(tr("Движок перезапущен", "Packet engine restarted").to_owned());

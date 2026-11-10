@@ -138,7 +138,7 @@ Compress-Archive -Path package/* -DestinationPath "NetFreedom-<версия>-win
 .\package\netfreedom.exe doctor
 ```
 
-Запуск (`start`, `tune`) требует прав администратора; движок `winws` и WinDivert лежат в `bin/`.
+Запуск (`start`, `tune`) требует прав администратора; драйвер WinDivert (`WinDivert.dll`, `WinDivert64.sys`) лежит в `bin/`; сам движок встроен в `netfreedom.exe`.
 
 ### Подпись и релиз
 
