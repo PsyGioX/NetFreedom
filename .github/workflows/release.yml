@@ -6,7 +6,7 @@
 #
 # Builds the Windows release from a version tag, writes SHA256SUMS.txt and attaches a signed build
 # provenance attestation, so anybody can prove with `gh attestation verify` that the exe came from
-# this repository. NOT RUN YET: try it with a tag such as v3.0.0-test first.
+# this repository. NOT RUN YET: try it with a tag such as v4.0.5-test first.
 #
 # Three jobs, each with only the rights it needs:
 #   build    compiles and tests; the only job with a third-party action; no secrets, read-only token.

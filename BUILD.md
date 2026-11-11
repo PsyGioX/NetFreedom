@@ -144,7 +144,7 @@ Compress-Archive -Path package/* -DestinationPath "NetFreedom-<версия>-win
 
 В workflow есть заготовка под подпись кода (SignPath): подписывать `package/netfreedom.exe` нужно
 **до** подсчёта контрольных сумм, иначе `verify` не пройдёт. Релиз в CI запускается пушем тега
-`v*` (например, `git tag v3.3.0 && git push origin v3.3.0`); тогда же формируется аттестация сборки
+`v*` (например, `git tag v4.0.5 && git push origin v4.0.5`); тогда же формируется аттестация сборки
 (`actions/attest-build-provenance`).
 
 ---
