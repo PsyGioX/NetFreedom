@@ -17,8 +17,8 @@
 
 [package]
 name = "netfreedom"
-version = "3.3.0"
-edition = "2021"
+version = "4.0.5"
+edition = "2026"
 description = "NetFreedom - open, local, reversible tool for reaching the open Internet from Russia: DPI-bypass strategies, Cloudflare WARP and game-aware tuning"
 license = "GPL-3.0-only"
 authors = ["Sergey (PsyGioX) <https://github.com/PsyGioX>"]
