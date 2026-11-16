@@ -15,9 +15,7 @@
 // You should have received a copy of the GNU General Public License along with
 // this program. If not, see <https://www.gnu.org/licenses/>.
 
-//! The status panel shown at the top of the main menu and in the live monitor.
-
-use std::time::Instant;
+//! The status panel shown at the top of the main menu: mode, uptime, DNS, engine / WARP state, events.
 
 use crate::backend;
 use crate::session::{self, Mode};
@@ -32,17 +30,6 @@ pub fn ago(secs: u64) -> String {
         format!("{} {}", secs / 60, tr("мин", "min"))
     } else {
         format!("{} {}", secs / 3600, tr("ч", "h"))
-    }
-}
-
-/// Colour class of a median latency for games.
-pub fn latency_color(ms: f64) -> &'static str {
-    if ms <= 60.0 {
-        GREEN
-    } else if ms <= 120.0 {
-        YELLOW
-    } else {
-        RED
     }
 }
 
@@ -61,24 +48,15 @@ pub fn lines() -> Vec<String> {
         }
         return v;
     };
-    let h = session::with_health(|h| {
+    let (warp_up, engine_alive, events, restarts, reconnects) = session::with_health(|h| {
         (
-            h.trace.clone(),
-            h.trace_err.clone(),
             h.warp_connected,
             h.engine_alive,
-            h.window.summary(),
-            h.window.loss_pct(),
-            h.window.len(),
-            h.via,
-            h.web.clone(),
-            h.web_at,
             h.events.iter().rev().take(3).map(|(t, m)| (t.elapsed().as_secs(), m.clone())).collect::<Vec<_>>(),
             h.engine_restarts,
             h.reconnects,
         )
     });
-    let (trace, trace_err, warp_up, engine_alive, win, loss, n, via, web, web_at, events, restarts, reconnects) = h;
     let secs = a.started.elapsed().as_secs();
     let mut v = vec![format!(
         "{} {}  {} · {} · {}",
@@ -88,60 +66,6 @@ pub fn lines() -> Vec<String> {
         a.plan.profile.name,
         fmt_dur(secs)
     )];
-
-    match a.mode {
-        Mode::Warp => {
-            let t = match (&trace, &trace_err) {
-                (Some(t), _) if t.warp.through_tunnel() => format!("{} warp=on · {} {} · IP {}", dot(GREEN), tr("дата-центр", "data centre"), clip(&t.colo, 6), clip(&t.ip, 20)),
-                (Some(_), _) => format!("{} {}", dot(RED), paint(RED, tr("трафик идёт МИМО туннеля (warp=off)", "traffic bypasses the tunnel (warp=off)"))),
-                (None, Some(e)) => format!("{} {}", dot(YELLOW), clip(e, 52)),
-                _ => format!("{} {}", dot(DIM), tr("проверяется…", "checking...")),
-            };
-            v.push(kv(tr("Туннель", "Tunnel"), &t));
-        }
-        Mode::Bypass => {
-            let s = if web.is_empty() {
-                format!("{} {}", dot(DIM), tr("первая проверка через несколько секунд…", "first check in a few seconds..."))
-            } else {
-                let ok = web.iter().filter(|w| w.ok).count();
-                let c = if ok == web.len() { GREEN } else if ok * 2 >= web.len() { YELLOW } else { RED };
-                let when = web_at.map(|t: Instant| ago(t.elapsed().as_secs())).unwrap_or_default();
-                format!("{} {ok}/{} {} · {when} {}", dot(c), web.len(), tr("открываются", "open"), tr("назад", "ago"))
-            };
-            v.push(kv(tr("Сайты", "Sites"), &s));
-            // name the sites that do not open: "4/9 open" alone does not say what to fix
-            let failing: Vec<&str> = web.iter().filter(|w| !w.ok).map(|w| w.name.as_str()).collect();
-            if !failing.is_empty() {
-                v.push(kv(tr("Не открыты", "Closed"), &clip(&failing.join(", "), 52)));
-                if web.iter().any(crate::web::connect_blocked) {
-                    v.push(kv("", &paint(DIM, &clip(tr("часть: блокировка по IP/DNS, стратегией не лечится", "some: IP/DNS block, a strategy cannot fix it"), 52))));
-                }
-            }
-        }
-    }
-
-    match &win {
-        Some(s) => {
-            let c = latency_color(s.median);
-            v.push(kv(tr("Задержка", "Latency"), &format!("{} {}", paint(c, &format!("{:>6} ms", fmt_ms(s.median))), ui::latency_bar(s.median, 20.0, 150.0))));
-            let lc = match crate::stats::level(s) {
-                crate::stats::Level::Bad => RED,
-                crate::stats::Level::Fair => YELLOW,
-                crate::stats::Level::Good => GREEN,
-            };
-            v.push(kv(
-                tr("Качество", "Quality"),
-                &format!("{} {} {} ms · {} {}% · {} {} {}", dot(lc), tr("джиттер", "jitter"), fmt_ms(s.jitter), tr("потери", "loss"), loss, tr("окно", "window"), n, tr("с", "s")),
-            ));
-        }
-        None if n > 0 => v.push(kv(tr("Задержка", "Latency"), &format!("{} {}", dot(RED), paint(RED, tr("нет ответов от сервера", "no replies from the host"))))),
-        None => v.push(kv(tr("Задержка", "Latency"), &format!("{} {}", dot(DIM), tr("измеряется…", "measuring...")))),
-    }
-    let host = match via {
-        Some(m) => format!("{} · {}", clip(&a.target, 40), m.label()),
-        None => clip(&a.target, 48),
-    };
-    v.push(kv(tr("Сервер", "Host"), &host));
 
     if let Some((p, t, rtt, fails)) = crate::dns::summary() {
         let (c, state) = match (rtt, fails) {
@@ -176,14 +100,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn age_formatting_and_colours() {
+    fn age_formatting() {
         crate::ui::set_ru(false);
         assert_eq!(ago(5), "5 s");
         assert_eq!(ago(130), "2 min");
         assert_eq!(ago(7300), "2 h");
-        assert_eq!(latency_color(30.0), GREEN);
-        assert_eq!(latency_color(100.0), YELLOW);
-        assert_eq!(latency_color(300.0), RED);
         crate::ui::set_ru(true);
     }
 

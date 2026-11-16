@@ -15,10 +15,10 @@
 // You should have received a copy of the GNU General Public License along with
 // this program. If not, see <https://www.gnu.org/licenses/>.
 
-//! The running session: what is active, since when, and the live health numbers.
+//! The running session: what is active, since when, and the state of the engine / WARP.
 //!
 //! Starting no longer blocks the console on "press Enter". The session lives in the background
-//! (engine + WARP + a watchdog thread, see `monitor`) and the main menu stays available, showing
+//! (engine + WARP + a local supervisor thread, see `supervisor`) and the main menu stays available, showing
 //! this state. It is stopped from the menu or by closing the window (the console / signal handler
 //! calls `cleanup`).
 
@@ -28,12 +28,8 @@ use std::sync::Mutex;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crate::health::Trace;
-use crate::probe::Via;
 use crate::paths::Layout;
 use crate::run::Plan;
-use crate::stats::Window;
-use crate::web::WebResult;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -49,42 +45,26 @@ pub struct Active {
     pub plan: Plan,
     pub layout: Layout,
     pub started: Instant,
-    /// Host whose latency is watched.
+    /// Host used by the on-demand ping check (menu item 3 / `check`).
     pub target: String,
 }
 
 pub struct Health {
-    pub trace: Option<Trace>,
-    pub trace_err: Option<String>,
     pub warp_connected: Option<bool>,
     pub engine_alive: bool,
-    pub window: Window,
-    /// How the latency is measured right now (ICMP, or TCP 443 when the host ignores ICMP).
-    pub via: Option<Via>,
-    pub web: Vec<WebResult>,
-    pub web_at: Option<Instant>,
     pub events: VecDeque<(Instant, String)>,
     pub engine_restarts: u32,
     pub reconnects: u32,
-    /// Seconds of the session during which the tunnel was verified `warp=on`.
-    pub verified_secs: u64,
 }
 
 impl Health {
     const fn new() -> Self {
         Self {
-            trace: None,
-            trace_err: None,
             warp_connected: None,
             engine_alive: true,
-            window: Window::new(60),
-            via: None,
-            web: Vec::new(),
-            web_at: None,
             events: VecDeque::new(),
             engine_restarts: 0,
             reconnects: 0,
-            verified_secs: 0,
         }
     }
 }
@@ -93,10 +73,10 @@ static ACTIVE: Mutex<Option<Active>> = Mutex::new(None);
 static HEALTH: Mutex<Health> = Mutex::new(Health::new());
 static STOP: AtomicBool = AtomicBool::new(false);
 static WARP_OWNED: AtomicBool = AtomicBool::new(false);
-static MONITOR: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
+static SUPERVISOR: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 
 fn lock<T>(m: &'static Mutex<T>) -> std::sync::MutexGuard<'static, T> {
-    // a panicked monitor must never take the menu down with it
+    // a panicked supervisor must never take the menu down with it
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -108,12 +88,11 @@ pub fn target() -> Option<String> {
     lock(&ACTIVE).as_ref().map(|a| a.target.clone())
 }
 
-/// Changes the watched host of the running session (the monitor picks it up within a second).
+/// Changes the host of the running session used by the on-demand ping check.
 pub fn set_target(t: &str) {
     if let Some(a) = lock(&ACTIVE).as_mut() {
         a.target = t.to_owned();
     }
-    lock(&HEALTH).window.clear();
 }
 
 pub fn is_active() -> bool {
@@ -141,22 +120,22 @@ pub fn event(msg: impl Into<String>) {
     h.events.push_back((Instant::now(), msg.into()));
 }
 
-/// Registers the session and starts the watchdog.
+/// Registers the session and starts the local supervisor.
 pub fn begin(a: Active) {
     *lock(&HEALTH) = Health::new();
     STOP.store(false, Ordering::SeqCst);
     *lock(&ACTIVE) = Some(a);
     event(crate::ui::tr("Сессия запущена", "Session started").to_owned());
-    let h = std::thread::Builder::new().name("monitor".into()).spawn(crate::monitor::run).ok();
-    *lock(&MONITOR) = h;
+    let h = std::thread::Builder::new().name("supervisor".into()).spawn(crate::supervisor::run).ok();
+    *lock(&SUPERVISOR) = h;
 }
 
-/// Stops the watchdog and forgets the session. Does not touch the engine / WARP.
+/// Stops the supervisor and forgets the session. Does not touch the engine / WARP.
 pub fn end() -> Option<Active> {
     STOP.store(true, Ordering::SeqCst);
-    let handle = lock(&MONITOR).take();
+    let handle = lock(&SUPERVISOR).take();
     if let Some(h) = handle {
-        // the monitor sleeps in 100 ms steps; a probe in flight is bounded by its own timeout
+        // the supervisor sleeps in 100 ms steps; a DNS check in flight is bounded by its own timeout
         let t0 = Instant::now();
         while !h.is_finished() && t0.elapsed() < Duration::from_secs(12) {
             std::thread::sleep(Duration::from_millis(50));

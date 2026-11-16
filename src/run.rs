@@ -474,7 +474,7 @@ fn verify_and_report(warp: &Warp, target: &str, a: &StartArgs) {
         Ok(t) => ui::ok(&format!("warp={} · {} {} · IP {}", if t.warp == health::WarpFlag::Plus { "plus" } else { "on" }, tr("дата-центр", "data centre"), t.colo, t.ip)),
         Err(e) => {
             ui::warn(&format!("{}: {e}", tr("Туннель НЕ подтверждён", "Tunnel NOT verified")));
-            println!("{}", tr("Результаты ниже могут описывать обычное соединение, а не WARP. Монитор продолжит проверки и переподключения.", "The numbers below may describe your normal connection, not WARP. The monitor keeps checking and reconnecting."));
+            println!("{}", tr("Результаты ниже могут описывать обычное соединение, а не WARP.", "The numbers below may describe your normal connection, not WARP."));
         }
     }
     if a.no_probe || a.headless {
@@ -505,11 +505,10 @@ fn start_bypass(layout: &Layout, a: StartArgs) -> Result<(), String> {
     sys::arm_cleanup(true);
     apply_dns(layout, &cfg, Mode::Bypass);
 
-    let mut first = Vec::new();
     if !a.no_probe && !a.headless {
         if web::curl_available() {
             println!("\n{}", tr("Проверяю, что работает (файл на Cloudflare, Discord, YouTube, соцсети)…", "Checking that it works (a Cloudflare-hosted file, Discord, YouTube, social networks)..."));
-            first = web::probe(Duration::from_secs(12));
+            let first = web::probe(Duration::from_secs(12));
             print_web(&first);
             let shallow: Vec<&str> = first.iter().filter(|r| r.shallow()).map(|r| r.name.as_str()).collect();
             if !shallow.is_empty() {
@@ -527,12 +526,6 @@ fn start_bypass(layout: &Layout, a: StartArgs) -> Result<(), String> {
         }
     }
     session::begin(Active { mode: Mode::Bypass, plan, layout: layout.clone(), started: Instant::now(), target });
-    if !first.is_empty() {
-        session::with_health(|h| {
-            h.web = first;
-            h.web_at = Some(Instant::now());
-        });
-    }
     if a.headless {
         hold_headless();
         stop_session();

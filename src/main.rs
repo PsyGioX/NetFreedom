@@ -371,37 +371,6 @@ fn start_from_menu(layout: &Layout, args: &[&str]) {
     pause_back();
 }
 
-/// Full-screen live status, refreshed every second; Enter returns to the menu.
-fn live_monitor() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
-    let done = Arc::new(AtomicBool::new(false));
-    let flag = done.clone();
-    let _ = std::thread::Builder::new().name("live-input".into()).spawn(move || {
-        ui::read_line();
-        flag.store(true, Ordering::SeqCst);
-    });
-    ui::clear();
-    while !done.load(Ordering::SeqCst) && session::is_active() {
-        ui::home();
-        dash::print();
-        ui::say(&format!("\n  {}", ui::paint(ui::DIM, ui::tr("Обновляется каждую секунду · Enter — назад в меню", "Refreshes every second · Enter: back to the menu"))));
-        ui::clear_below();
-        for _ in 0..10 {
-            if done.load(Ordering::SeqCst) {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-    }
-    if !done.load(Ordering::SeqCst) {
-        println!("{}", ui::tr("Сессия остановлена. Нажмите Enter…", "The session was stopped. Press Enter..."));
-        while !done.load(Ordering::SeqCst) {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-    }
-}
-
 fn quality_now() {
     let Some(a) = session::active() else { return };
     println!("{}", ui::tr("Измеряю (обычно 10–15 с, максимум около 30 с)…", "Measuring (usually 10-15 s, at most about 30 s)..."));
@@ -412,16 +381,12 @@ fn quality_now() {
             let r = nf::web::probe(std::time::Duration::from_secs(8));
             run::print_web(&r);
             println!("{} {:.0} {}", ui::tr("Заняло", "Took"), t0.elapsed().as_secs_f64(), ui::tr("с", "s"));
-            session::with_health(|h| {
-                h.web = r;
-                h.web_at = Some(std::time::Instant::now());
-            });
         }
     }
 }
 
 fn set_game_server(layout: &Layout) {
-    println!("{}", ui::tr("IP (или имя) игрового сервера: по нему монитор считает задержку, джиттер и потери.", "IP (or name) of your game server: the monitor measures latency, jitter and loss to it."));
+    println!("{}", ui::tr("IP (или имя) игрового сервера: по нему считаются задержка, джиттер и потери при проверке по запросу.", "IP (or name) of your game server: the on-demand check measures latency, jitter and loss to it."));
     println!("{}", ui::tr("Узнать его можно в консоли игры, в Resource Monitor → Network → TCP/UDP-соединения игры.", "Find it in the game console or in Resource Monitor -> Network."));
     let t = ui::ask(ui::tr("Сервер", "Server"), &current_target(layout));
     if probe::resolve_v4(&t).is_none() {
@@ -447,7 +412,6 @@ fn menu(layout: &Layout) -> (i32, bool) {
         println!();
         if active {
             menu_item("1", ui::tr("Остановить всё", "Stop everything"), ui::tr("отключить WARP и движок", "disconnect WARP and the engine"));
-            menu_item("2", ui::tr("Живой мониторинг", "Live monitor"), ui::tr("задержка, потери, туннель в реальном времени", "latency, loss and tunnel in real time"));
             menu_item("3", ui::tr("Проверить качество сейчас", "Check quality now"), ui::tr("честный тест: сначала проверяет туннель", "an honest test: proves the tunnel first"));
         } else {
             menu_item("1", ui::tr("Игры через Cloudflare WARP", "Games via Cloudflare WARP"), ui::tr("снижает пинг и потери в играх", "lower ping and loss in games"));
@@ -468,13 +432,12 @@ fn menu(layout: &Layout) -> (i32, bool) {
         }
         menu_item("0", ui::tr("Выход", "Exit"), if active { ui::tr("остановит всё", "stops everything") } else { "" });
         println!();
-        let keys = if active { "123456789DSL0" } else { "123456789DSLU0" };
+        let keys = if active { "13456789DSL0" } else { "123456789DSLU0" };
         match (ui::choice(ui::tr("Выбор: ", "Select: "), keys), active) {
             ('1', true) => {
                 run::stop_session();
                 pause_back();
             }
-            ('2', true) => live_monitor(),
             ('3', true) => {
                 quality_now();
                 pause_back();
