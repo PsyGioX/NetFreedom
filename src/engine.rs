@@ -40,6 +40,7 @@ use crate::faketls::{self, TlsMod, DEFAULT_FAKE_TLS};
 use crate::hostlist::{self, HostList};
 use crate::http;
 use crate::ipset::IpSet;
+use crate::mask::{self, Mask};
 use crate::quic::is_quic_initial;
 use crate::quic_sni;
 use crate::tcp::{self, Split, Tcp, TcpRule};
@@ -125,6 +126,8 @@ pub struct Rule {
     /// `--hostlist` / `--hostlist-exclude`: matched against the SNI of a QUIC Initial.
     pub include: Option<HostList>,
     pub exclude: Option<HostList>,
+    /// `--nf-mask`: QUIC fakes are built per packet (see [`mask`]) instead of sent from the blobs.
+    pub mask: Option<Mask>,
 }
 
 impl Rule {
@@ -257,6 +260,8 @@ pub struct TcpSpec {
     /// `syndata`: the payload put into the SYN. Only set for rules that can match a SYN, i.e. that
     /// have no host list.
     pub syndata: Option<Vec<u8>>,
+    /// `--nf-mask`: fake ClientHellos / HTTP requests are built per connection (see [`mask`]).
+    pub mask: Option<Mask>,
 }
 
 impl TcpSpec {
@@ -329,6 +334,7 @@ struct Seg {
     fake_syndata: Option<Vec<u8>>,
     udp_only: Option<String>,
     tcp_only: Option<String>,
+    mask: Option<Mask>,
 }
 
 impl Seg {
@@ -351,6 +357,7 @@ impl Seg {
             fake_syndata: None,
             udp_only: None,
             tcp_only: None,
+            mask: None,
         }
     }
 
@@ -381,6 +388,7 @@ impl Seg {
                 r.exclude = self.exc;
                 r.ips = self.ips;
                 r.ips_exclude = self.ipx;
+                r.mask = self.mask;
                 rules.push(r);
                 Ok(())
             }
@@ -443,6 +451,10 @@ impl Seg {
                 if rule.split == Split::None && (rule.seqovl > 0 || !rule.positions.is_empty()) {
                     return Err("split options without multisplit / multidisorder".into());
                 }
+                // what a mask can change: the fakes, the overlap pattern of multisplit, the fake host of hostfakesplit
+                if self.mask.is_some() && !(fake || (rule.split == Split::Multisplit && rule.seqovl > 0) || rule.split == Split::HostFakeSplit) {
+                    return Err("--nf-mask on a rule that sends nothing the mask could replace (no fake, no seqovl, no hostfakesplit)".into());
+                }
                 if self.inc.is_some() && self.ips.is_some() {
                     return Err("both --hostlist and --ipset in one rule".into());
                 }
@@ -476,6 +488,7 @@ impl Seg {
                     inert,
                     autottl: self.autottl,
                     syndata,
+                    mask: self.mask,
                 });
                 Ok(())
             }
@@ -653,6 +666,8 @@ impl Plan {
                     seg.fake_syndata = Some(blob(v)?);
                     tcp_only();
                 }
+                // NetFreedom's own: masked fakes (native engine only; nfqws never sees it)
+                "--nf-mask" => seg.mask = Some(Mask::parse(v)?),
                 "--dpi-desync-ttl" => seg.udp.ttl = Some(v.parse().ok().filter(|n| *n >= 1).ok_or("bad --dpi-desync-ttl")?),
                 "--dpi-desync-ttl6" => seg.udp.ttl6 = Some(v.parse().ok().filter(|n| *n >= 1).ok_or("bad --dpi-desync-ttl6")?),
                 "--ip-id" if v == "zero" => {
@@ -1081,15 +1096,31 @@ impl Engine {
             let mut buf = std::mem::take(&mut self.scratch);
             let mut id = ip_id;
             let mut sent = 0u64;
-            for blob in &r.fakes[class as usize] {
-                build_fake(pkt, &u, id, ttl, blob, &mut buf);
-                let mut a = *addr;
-                io.finalize(&mut buf, &mut a);
-                for _ in 0..repeats {
-                    io.send(&buf, &a);
+            if let Some(m) = r.mask.as_ref().filter(|_| class == U7::Quic) {
+                // masked: every copy is a different, valid Initial (new connection id, keys and hello),
+                // the number of fakes and repeats stays what the rule says
+                for _ in 0..r.fakes[class as usize].len().max(1) {
+                    for _ in 0..repeats {
+                        let blob = mask::quic_fake(m, &mut self.rng);
+                        build_fake(pkt, &u, id, ttl, &blob, &mut buf);
+                        let mut a = *addr;
+                        io.finalize(&mut buf, &mut a);
+                        io.send(&buf, &a);
+                    }
+                    sent += repeats as u64;
+                    id = id.wrapping_add(1);
                 }
-                sent += repeats as u64;
-                id = id.wrapping_add(1);
+            } else {
+                for blob in &r.fakes[class as usize] {
+                    build_fake(pkt, &u, id, ttl, blob, &mut buf);
+                    let mut a = *addr;
+                    io.finalize(&mut buf, &mut a);
+                    for _ in 0..repeats {
+                        io.send(&buf, &a);
+                    }
+                    sent += repeats as u64;
+                    id = id.wrapping_add(1);
+                }
             }
             self.stats.fakes_sent += sent;
             self.stats.desynced += 1;
@@ -1224,15 +1255,40 @@ impl Engine {
         let spec = &self.tcp[idx];
         let fakes: Vec<Vec<u8>> = match (spec.fake, l7) {
             (false, _) => Vec::new(),
-            (true, L7::Http) => vec![FAKE_HTTP.to_vec()],
-            (true, _) => spec.fake_tls.iter().map(|(b, m)| faketls::apply(b, m, payload, &mut self.rng)).collect(),
+            (true, L7::Http) => match &spec.mask {
+                Some(m) => vec![mask::http_fake(m, &mut self.rng)],
+                None => vec![FAKE_HTTP.to_vec()],
+            },
+            // a masked rule builds every fake anew; the number of fakes per connection stays what the rule says
+            (true, _) => match &spec.mask {
+                Some(m) => (0..spec.fake_tls.len().max(1)).map(|_| mask::tls_fake(m, payload, &mut self.rng)).collect(),
+                None => spec.fake_tls.iter().map(|(b, m)| faketls::apply(b, m, payload, &mut self.rng)).collect(),
+            },
         };
         let ttl_fake = spec.autottl.filter(|_| !t.v6).and_then(|a| {
             let (h, seen) = *self.hops.get(&[t.dst[0], t.dst[1], t.dst[2], t.dst[3]])?;
             (now.saturating_sub(seen) < IPCACHE_LIFETIME_MS).then_some(h).and_then(|h| a.eval(h))
         });
         let orig_id = if t.v6 { 0 } else { u16::from_be_bytes([pkt[4], pkt[5]]) };
-        let (out, keep) = tcp::desync_payload(&spec.rule, &fakes, ttl_fake, pkt, t, payload, hello, orig_id);
+        // masked: the overlap in front of a multisplit is a fake ClientHello too (a fixed one is a
+        // signature, and it is as long as `seqovl` says), and hostfakesplit takes its fake host from the pool
+        let masked_rule;
+        let rule: &TcpRule = match (&spec.mask, l7) {
+            (Some(m), L7::Tls) if (spec.rule.split == Split::Multisplit && spec.rule.seqovl > 0) || spec.rule.split == Split::HostFakeSplit => {
+                let mut r = spec.rule.clone();
+                if r.split == Split::HostFakeSplit {
+                    r.hfs_host = Some(m.host(&mut self.rng).to_owned());
+                } else {
+                    let pat = mask::tls_fake(m, payload, &mut self.rng);
+                    r.seqovl = pat.len();
+                    r.seqovl_pattern = pat;
+                }
+                masked_rule = r;
+                &masked_rule
+            }
+            _ => &spec.rule,
+        };
+        let (out, keep) = tcp::desync_payload(rule, &fakes, ttl_fake, pkt, t, payload, hello, orig_id);
         let nfakes = fakes.len() as u64 * spec.rule.fake_repeats.max(1) as u64;
         (out, keep, nfakes)
     }
@@ -2243,5 +2299,160 @@ mod tests {
         e.handle(&l1, &Addr::default(), 1000, &mut io);
         e.flush_expired(1000 + QHOLD_TIMEOUT_MS, &mut io);
         assert_eq!(io.sent, vec![l1], "the name never came: an include list cannot match, the datagram goes alone");
+    }
+
+    // ------------------------------------------------------------------------ masked fakes
+
+    #[test]
+    fn a_masked_tls_rule_builds_every_fake_anew_from_the_pool() {
+        use crate::tcp::tests::mk4;
+        use crate::tls::tests::hello;
+        let mut a = tls_args();
+        a.push("--nf-mask=chrome,vk.com,mail.ru".into());
+        let plan = Plan::from_args(&a, &tcp_reader).unwrap();
+        assert!(plan.tcp[0].mask.is_some());
+        let ch = hello(Some("www.blocked.test"));
+        let mut e = Engine::new(Vec::new(), 5).with_tcp(plan.tcp);
+        let (mut names, mut bodies) = (std::collections::HashSet::new(), std::collections::HashSet::new());
+        for i in 0..24u32 {
+            let pkt = mk4(5000 + i * 1000, 7, &ch);
+            let mut io = Mock::default();
+            e.handle(&pkt, &Addr::default(), i as u64, &mut io);
+            assert_eq!(io.sent.len(), 2 + 3, "2 copies of the fake + 3 split segments, as without the mask");
+            assert_eq!(io.sent[0], io.sent[1], "the repeats of one fake are copies of it");
+            let f = crate::tcp::parse_tcp(&io.sent[0]).unwrap();
+            let fake = &io.sent[0][f.payload_off..f.end];
+            let h = tls::parse(fake).expect("a ClientHello the engine's parser reads");
+            names.insert(tls::sni(fake, &h).unwrap().to_owned());
+            bodies.insert(fake.to_vec());
+            assert_eq!(f.seq, 5000 + i * 1000, "a ts-fooled fake keeps the SEQ");
+        }
+        assert_eq!(names, ["vk.com", "mail.ru"].iter().map(|x| x.to_string()).collect(), "the static sni=ya.ru of the rule is replaced by the pool");
+        assert_eq!(bodies.len(), 24, "no two connections get the same fake");
+        assert_eq!(e.stats.fakes_sent, 24 * 2);
+    }
+
+    #[test]
+    fn a_masked_quic_rule_sends_a_different_valid_initial_for_every_repeat() {
+        let rules = udp_plan(&["--filter-udp=443", "--dpi-desync=fake", "--dpi-desync-repeats=4", "--dpi-desync-fake-quic=PAT", "--dpi-desync-ttl=5", "--nf-mask=firefox,ya.ru,vk.com"]);
+        assert!(rules[0].mask.is_some());
+        let orig = udp4(50000, 443, 128, 0x1234, &sample_initial(1200));
+        let sent = run_udp(rules, &orig);
+        assert_eq!(sent.len(), 4 + 1);
+        assert_eq!(sent[4], orig, "the original goes last and is untouched");
+        let distinct: std::collections::HashSet<_> = sent[..4].iter().map(|p| udp_payload(p).to_vec()).collect();
+        assert_eq!(distinct.len(), 4, "four different datagrams");
+        for p in &sent[..4] {
+            assert!(udp_checksum_ok(p));
+            let u = parse_udp(p).unwrap();
+            assert_eq!((u.sport, u.dport, u.ttl), (50000, 443, 5), "same flow, the rule's TTL");
+            let host = quic_sni::host(udp_payload(p)).expect("a reader that decrypts Initials finds a name");
+            assert!(host == "ya.ru" || host == "vk.com", "{host}");
+            assert!(is_quic_initial(udp_payload(p)));
+        }
+    }
+
+    #[test]
+    fn a_masked_rule_keeps_the_number_of_fakes_of_the_unmasked_one() {
+        let args = ["--filter-udp=443", "--dpi-desync=fake", "--dpi-desync-repeats=3", "--dpi-desync-fake-quic=PAT", "--dpi-desync-fake-quic=FAKE"];
+        let orig = udp4(50000, 443, 128, 1, &sample_initial(1200));
+        let plain = run_udp(udp_plan(&args), &orig).len();
+        let mut m = args.to_vec();
+        m.push("--nf-mask=ya.ru");
+        assert_eq!(run_udp(udp_plan(&m), &orig).len(), plain);
+    }
+
+    #[test]
+    fn a_masked_http_rule_sends_a_browser_like_request_for_a_pool_host() {
+        use crate::tcp::tests::mk4;
+        let plan = Plan::from_args(&s(&["--filter-tcp=80", "--filter-l7=http", "--dpi-desync=fake,multisplit", "--dpi-desync-split-pos=method+2", "--dpi-desync-fooling=ts", "--dpi-desync-repeats=2", "--nf-mask=ya.ru,vk.com"]), &tcp_reader).unwrap();
+        let mut pkt = mk4(100, 1, b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n");
+        pkt[22..24].copy_from_slice(&80u16.to_be_bytes());
+        let mut e = Engine::new(Vec::new(), 5).with_tcp(plan.tcp);
+        let mut io = Mock::default();
+        e.handle(&pkt, &Addr::default(), 0, &mut io);
+        assert_eq!(io.sent.len(), 2 + 2);
+        let t = crate::tcp::parse_tcp(&io.sent[0]).unwrap();
+        let fake = String::from_utf8(io.sent[0][t.payload_off..t.end].to_vec()).unwrap();
+        assert!(fake.starts_with("GET / HTTP/1.1\r\nHost: ya.ru\r\n") || fake.starts_with("GET / HTTP/1.1\r\nHost: vk.com\r\n"), "{fake}");
+        assert!(fake.contains("User-Agent: Mozilla/5.0") && !fake.contains("iana.org"), "not zapret's fixed request");
+    }
+
+    #[test]
+    fn a_masked_multisplit_overlaps_with_a_fresh_fake_hello_every_time() {
+        use crate::tcp::tests::mk4;
+        use crate::tls::tests::hello;
+        let plan = Plan::from_args(&s(&["--filter-tcp=443", "--hostlist=BLOCKED", "--dpi-desync=multisplit", "--dpi-desync-split-pos=1", "--dpi-desync-split-seqovl=681", "--dpi-desync-split-seqovl-pattern=PAT", "--nf-mask=chrome,vk.com,mail.ru"]), &tcp_reader).unwrap();
+        let ch = hello(Some("www.blocked.test"));
+        let mut e = Engine::new(Vec::new(), 5).with_tcp(plan.tcp);
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..12u32 {
+            let pkt = mk4(9000, 7, &ch);
+            let mut io = Mock::default();
+            e.handle(&pkt, &Addr::default(), i as u64, &mut io);
+            assert_eq!(io.sent.len(), 2, "split in two, no fakes: the rule has none");
+            let first = crate::tcp::parse_tcp(&io.sent[0]).unwrap();
+            let data = &io.sent[0][first.payload_off..first.end];
+            let overlap = data.len() - 1; // one real byte follows the overlap (split-pos=1)
+            assert_eq!(first.seq, 9000u32.wrapping_sub(overlap as u32), "the overlap is as long as the fake hello it carries");
+            let fake = &data[..overlap];
+            let h = tls::parse(fake).expect("the overlap is a ClientHello");
+            assert!(["vk.com", "mail.ru"].contains(&tls::sni(fake, &h).unwrap()));
+            assert_eq!(u16::from_be_bytes([fake[3], fake[4]]) as usize, fake.len() - 5, "and a complete one");
+            assert_eq!(&data[overlap..], &ch[..1], "then the first real byte");
+            seen.insert(fake.to_vec());
+        }
+        assert_eq!(seen.len(), 12);
+    }
+
+    #[test]
+    fn a_masked_hostfakesplit_draws_the_fake_host_from_the_pool() {
+        use crate::tcp::tests::mk4;
+        use crate::tls::tests::hello;
+        let plan = Plan::from_args(&s(&["--filter-tcp=443", "--hostlist=BLOCKED", "--dpi-desync=hostfakesplit", "--dpi-desync-fooling=ts", "--dpi-desync-hostfakesplit-mod=host=ya.ru", "--nf-mask=firefox,www.vk.com,www.mail.ru"]), &tcp_reader).unwrap();
+        let ch = hello(Some("www.blocked.test"));
+        let mut e = Engine::new(Vec::new(), 9).with_tcp(plan.tcp);
+        let mut hosts = std::collections::HashSet::new();
+        for i in 0..24u32 {
+            let mut io = Mock::default();
+            e.handle(&mk4(100, 1, &ch), &Addr::default(), i as u64, &mut io);
+            let all: Vec<u8> = io.sent.iter().flat_map(|p| { let t = crate::tcp::parse_tcp(p).unwrap(); p[t.payload_off..t.end].to_vec() }).collect();
+            for h in ["www.vk.com", "www.mail.ru"] {
+                if all.windows(h.len()).any(|w| w == h.as_bytes()) {
+                    hosts.insert(h);
+                }
+            }
+        }
+        assert_eq!(hosts.len(), 2, "both pool hosts are used as the fake host: {hosts:?}");
+    }
+
+    #[test]
+    fn every_masked_strategy_runs_on_the_native_engine_and_survives_the_linux_lowering() {
+        use crate::{capture, nftrules, profiles};
+        let vars = capture::Vars { bin: "B/", lists: "L/", wfraw: crate::profiles_data::WFRAW, gf_tcp: "1024-65535", gf_udp: "1024-65535" };
+        let mut n = 0;
+        for p in profiles::PROFILES {
+            let tpl = p.classic.or(p.lean).unwrap();
+            if !tpl.iter().any(|a| a.starts_with("--nf-mask=")) {
+                continue;
+            }
+            n += 1;
+            let args = capture::expand(tpl, &vars);
+            let plan = Plan::from_args(&args, &tcp_reader).unwrap_or_else(|e| panic!("{}: {e}", p.name));
+            assert!(plan.tcp.iter().any(|t| t.mask.is_some()) || plan.rules.iter().any(|r| r.mask.is_some()), "{}", p.name);
+            // nfqws on Linux never sees the option, and what is left is still a whole strategy
+            let (_, rest) = nftrules::split_args(&args).unwrap_or_else(|e| panic!("{}: {e}", p.name));
+            assert!(rest.iter().all(|a| !a.starts_with("--nf-")), "{}", p.name);
+            assert!(rest.iter().any(|a| a.starts_with("--dpi-desync=")), "{}", p.name);
+        }
+        assert_eq!(n, 6, "mask, mask-lite, mask-disorder, mask-split, mask-hostfake and warp-mask");
+    }
+
+    #[test]
+    fn masking_needs_something_to_mask_and_a_valid_pool() {
+        assert!(Plan::from_args(&s(&["--filter-tcp=443", "--dpi-desync=multisplit", "--dpi-desync-split-pos=1", "--nf-mask=ya.ru"]), &tcp_reader).is_err(), "a split-only rule sends no fakes");
+        assert!(Plan::from_args(&s(&["--filter-tcp=443", "--dpi-desync=fake", "--nf-mask=nodot"]), &tcp_reader).is_err());
+        assert!(Plan::from_args(&s(&["--filter-tcp=443", "--dpi-desync=fake", "--nf-mask=chrome"]), &tcp_reader).is_err(), "no host name");
+        assert!(Plan::from_args(&s(&["--filter-tcp=443", "--dpi-desync=fake", "--nf-mask=ya.ru"]), &tcp_reader).is_ok());
     }
 }

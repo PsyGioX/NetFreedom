@@ -292,8 +292,54 @@ TECH.update({
 })
 
 
-def quic(repeats):
-    return ["--dpi-desync=fake", f"--dpi-desync-repeats={repeats}", f"--dpi-desync-fake-quic={GOOGLE_QUIC}"]
+# ------------------------------------------------------------------------------ masked fakes
+# `--nf-mask=<hosts>` is NetFreedom's own option (see src/mask.rs). The built-in engine then builds
+# every fake itself, shaped like a real browser's (Chrome / Firefox) and with a server name drawn
+# from the list, instead of sending the same static blob each time; it also replaces the overlap
+# pattern of a multisplit and the fake host of hostfakesplit. On Linux nfqws never sees the option
+# (nftrules::split_args strips it) and sends the static fakes that stay in the strategy as they are.
+MASK_RU = ("ya.ru,yandex.ru,dzen.ru,vk.com,mail.ru,ok.ru,gosuslugi.ru,sberbank.ru,ozon.ru,"
+           "wildberries.ru,avito.ru,rutube.ru,2gis.ru,kinopoisk.ru")
+MASK_WORLD = "www.google.com,www.microsoft.com,www.apple.com,www.cloudflare.com,www.wikipedia.org,www.bing.com"
+MASK_MIX = MASK_RU + "," + MASK_WORLD
+MASK = lambda pool: f"--nf-mask={pool}"
+
+# technique -> host pool of its mask
+MASKED = {"mask": MASK_MIX, "mask-lite": MASK_MIX, "mask-disorder": MASK_MIX, "mask-split": MASK_MIX, "mask-hostfake": MASK_RU}
+
+TECH.update({
+    # the geometry of `fakesplit` (the one that works on most providers), but nothing is a constant:
+    # fake hello, overlap and QUIC fakes are different for every connection
+    "mask": [
+        "--dpi-desync=fake,multisplit", "--dpi-desync-split-seqovl=681", "--dpi-desync-split-pos=1",
+        "--dpi-desync-fooling=ts", "--dpi-desync-repeats=4",
+        f"--dpi-desync-split-seqovl-pattern={GOOGLE_TLS}", MOD("www.google.com"), MASK(MASK_MIX),
+    ],
+    "mask-lite": [
+        "--dpi-desync=fake,multisplit", "--dpi-desync-split-seqovl=681", "--dpi-desync-split-pos=1",
+        "--dpi-desync-fooling=ts", "--dpi-desync-repeats=2",
+        f"--dpi-desync-split-seqovl-pattern={GOOGLE_TLS}", MOD("www.google.com"), MASK(MASK_MIX),
+    ],
+    "mask-disorder": [
+        "--dpi-desync=fake,multidisorder", "--dpi-desync-split-pos=1,midsld",
+        "--dpi-desync-fooling=ts", "--dpi-desync-repeats=4", MOD("www.google.com"), MASK(MASK_MIX),
+    ],
+    # no fake packets, only the overlap in front of the split differs every time
+    "mask-split": [
+        "--dpi-desync=multisplit", "--dpi-desync-split-seqovl=681", "--dpi-desync-split-pos=1",
+        f"--dpi-desync-split-seqovl-pattern={GOOGLE_TLS}", MASK(MASK_MIX),
+    ],
+    # a different domestic name in front of the real one for every connection (16 KB freeze)
+    "mask-hostfake": [
+        "--dpi-desync=hostfakesplit", "--dpi-desync-fooling=ts,md5sig",
+        "--dpi-desync-hostfakesplit-mod=host=ya.ru", "--dpi-desync-repeats=4", MASK(MASK_RU),
+    ],
+})
+
+
+def quic(repeats, mask=None):
+    return ["--dpi-desync=fake", f"--dpi-desync-repeats={repeats}", f"--dpi-desync-fake-quic={GOOGLE_QUIC}",
+            *([MASK(mask)] if mask else [])]
 
 
 HTTP_RULE = ["--dpi-desync=fake,multisplit", "--dpi-desync-split-pos=method+2", "--dpi-desync-fooling=ts", "--dpi-desync-repeats=4"]
@@ -301,7 +347,8 @@ HTTP_RULE = ["--dpi-desync=fake,multisplit", "--dpi-desync-split-pos=method+2", 
 
 # Our own techniques that send fake packets. Only these get the extra googlevideo rule below: the
 # proven original strategies are kept verbatim, and the split-only ones must stay free of fakes.
-GV_TECHS = {"fakesplit", "fakesplit-lite", "disorder", "max", "disorder-sni", "disorder-ya", "fdisorder", "ttl", "seqfake"}
+GV_TECHS = {"fakesplit", "fakesplit-lite", "disorder", "max", "disorder-sni", "disorder-ya", "fdisorder", "ttl", "seqfake",
+            "mask", "mask-lite", "mask-disorder"}
 
 # YouTube video comes from googlevideo.com. On some providers (MGTS, Rostelecom in autumn 2026) the
 # page opens while TLS to googlevideo.com never completes with ANY of the general techniques; a
@@ -317,11 +364,14 @@ GOOGLEVIDEO_RULE = [
 def classic(tech, r_quic):
     """Port based capture: the strategy for sites, Discord, YouTube, Instagram, X and games."""
     t = TECH[tech]
+    m = MASKED.get(tech)
+    http = HTTP_RULE + ([MASK(m)] if m else [])
+    quic_ = lambda r: quic(r, m)
     segs = [
         # QUIC (HTTP/3) to listed hosts
-        ["--filter-udp=443", *HOSTS_GENERAL, *EXCLUDES, *quic(r_quic)],
+        ["--filter-udp=443", *HOSTS_GENERAL, *EXCLUDES, *quic_(r_quic)],
         # QUIC to YouTube: Chrome prefers it, and it was in no rule (list-google.txt is TCP only)
-        ["--filter-udp=443", "--hostlist={LISTS}list-google.txt", *quic(r_quic)],
+        ["--filter-udp=443", "--hostlist={LISTS}list-google.txt", *quic_(r_quic)],
         # Discord voice + STUN
         ["--filter-udp=19294-19344,50000-50100", "--filter-l7=discord,stun", "--dpi-desync=fake",
          "--dpi-desync-repeats=6", f"--dpi-desync-fake-discord={ACTIVE_DISCORD}",
@@ -335,9 +385,9 @@ def classic(tech, r_quic):
         # everything else on the lists (sites, Instagram, X, ...)
         ["--filter-tcp=443", *HOSTS_GENERAL, *EXCLUDES, *t],
         # plain HTTP: listed hosts only, with an HTTP-shaped rule (rule 4)
-        ["--filter-tcp=80", "--filter-l7=http", *HOSTS_GENERAL, *EXCLUDES, *HTTP_RULE],
+        ["--filter-tcp=80", "--filter-l7=http", *HOSTS_GENERAL, *EXCLUDES, *http],
         # QUIC to blocked ranges
-        ["--filter-udp=443", *IPSET_ALL, *EXCLUDES, *quic(r_quic)],
+        ["--filter-udp=443", *IPSET_ALL, *EXCLUDES, *quic_(r_quic)],
         # TLS to blocked ranges (Cloudflare, Hetzner, OVH, ... the 16 KB cut-off targets)
         ["--filter-tcp=443,8443", *IPSET_ALL, *EXCLUDES, *t],
         # Telegram clients: by address, TLS port only (rule 4)
@@ -380,6 +430,8 @@ def flatten(segs, head):
 STRATEGIES = [
     ("warp", "WARP handshake only, 6 fake QUIC Initials (default; least overhead)",
      None, lean(quic(6), 12, 2)),
+    ("warp-mask", "WARP handshake only, 4 fake Initials, each different and valid, browser-like (built-in engine)",
+     None, lean(quic(4, MASK_MIX), 6, 2)),
     ("warp-heavy", "WARP handshake only, 11 fake Initials: for providers that need more noise",
      None, lean(quic(11), 10, 4)),
     ("warp-ttl", "WARP handshake only, fakes expire before Cloudflare (TTL 6)",
@@ -402,6 +454,11 @@ STRATEGIES = [
 ]
 BYPASS = [
     ("balanced", "fake + overlapping split with a harmless SNI (good first try)", "fakesplit", 6),
+    ("mask", "balanced geometry, but every fake is built anew like a browser's ClientHello (Windows engine)", "mask", 4),
+    ("mask-lite", "mask with 2 fakes and 2 QUIC fakes: the smallest burst per connection", "mask-lite", 2),
+    ("mask-disorder", "mask with out-of-order segments", "mask-disorder", 4),
+    ("mask-split", "overlapping split with a fresh fake overlap every time, no fake packets", "mask-split", 4),
+    ("mask-hostfake", "16 KB freeze: a different domestic fake host for every connection (ts+md5sig)", "mask-hostfake", 4),
     ("balanced-lite", "like balanced with 3 fakes and 3 QUIC fakes: less uplink burst per connection", "fakesplit-lite", 3),
     ("hostfake-vk", "16 KB freeze: fake host vk.com in front of the real one (ts+md5sig)", "hostfake-vk", 6),
     ("hostfake-gu", "16 KB freeze: fake host gosuslugi.ru in front of the real one (ts+md5sig)", "hostfake-gu", 6),

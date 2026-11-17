@@ -481,7 +481,9 @@ fn verify_and_report(warp: &Warp, target: &str, a: &StartArgs) {
         return;
     }
     println!("\n{}", tr("Тест качества (≈10 с)…", "Quality test (~10 s)..."));
-    health::print_report(&health::full_check(target, 25, true));
+    // the measuring is silent for 10-30 s: show that it lives, with the seconds it has taken
+    let t = target.to_owned();
+    health::print_report(&ui::spin_task(tr("Тест качества", "Quality test"), move || health::full_check(&t, 25, true)));
     if target == "1.1.1.1" {
         println!("{}", tr("Это задержка до Cloudflare, а не до игрового сервера. Укажите IP сервера в меню (пункт «IP игрового сервера»).", "This is latency to Cloudflare, not to your game server. Set the server IP in the menu."));
     }

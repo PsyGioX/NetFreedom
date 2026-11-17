@@ -27,6 +27,9 @@ use std::time::{Duration, Instant};
 
 pub fn console_init() {}
 
+/// Windows puts the console input mode back here; a terminal needs nothing.
+pub fn console_restore() {}
+
 pub fn set_title(title: &str) {
     if std::io::stdout().is_terminal() {
         print!("\x1b]0;{title}\x07");

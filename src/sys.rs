@@ -23,7 +23,7 @@ use std::ffi::{c_void, OsStr};
 use std::mem::{size_of, zeroed};
 use std::os::windows::ffi::OsStrExt;
 use std::ptr::{null, null_mut};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -97,7 +97,18 @@ pub fn open_url(url: &str) -> bool {
 
 // -------------------------------------------------------------------- console
 
-/// UTF-8 code page, ANSI colours.
+/// The console's input mode as we found it (`u32::MAX`: nothing to restore).
+static CONSOLE_IN_MODE: AtomicU32 = AtomicU32::new(u32::MAX);
+
+/// UTF-8 code page, ANSI colours, and QuickEdit switched OFF.
+///
+/// QuickEdit is on by default in cmd.exe / conhost. One click anywhere in the window (to focus
+/// it after the UAC prompt, say) starts a text selection, and from then on the console BLOCKS
+/// every write of the process until Enter or Esc is pressed: the program looks frozen on the line
+/// it printed last (typically "Quality test") and "wakes up" when the user hits Enter. Nothing
+/// in this program needs mouse selection to be a console mode; copying still works from the
+/// window menu and in Windows Terminal. The original mode is put back by [`console_restore`], so
+/// the shell the program was started from is left as it was.
 pub fn console_init() {
     unsafe {
         SetConsoleOutputCP(65001);
@@ -107,6 +118,21 @@ pub fn console_init() {
         if GetConsoleMode(h, &mut mode) != 0 {
             SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
         }
+        let hin = GetStdHandle(STD_INPUT_HANDLE);
+        let mut im = 0u32;
+        if GetConsoleMode(hin, &mut im) != 0 && im & ENABLE_QUICK_EDIT_MODE != 0 {
+            CONSOLE_IN_MODE.store(im, Ordering::SeqCst);
+            // ENABLE_EXTENDED_FLAGS is what makes Windows honour the QuickEdit bit at all
+            SetConsoleMode(hin, (im & !ENABLE_QUICK_EDIT_MODE) | ENABLE_EXTENDED_FLAGS);
+        }
+    }
+}
+
+/// Puts the console input mode back (QuickEdit as the user had it). Safe to call repeatedly.
+pub fn console_restore() {
+    let im = CONSOLE_IN_MODE.swap(u32::MAX, Ordering::SeqCst);
+    if im != u32::MAX {
+        unsafe { SetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), im | ENABLE_EXTENDED_FLAGS) };
     }
 }
 
@@ -189,6 +215,7 @@ unsafe extern "system" fn on_ctrl(event: u32) -> BOOL {
             f();
         }
     }
+    console_restore();
     std::process::exit(if event == CTRL_C_EVENT || event == CTRL_BREAK_EVENT { 130 } else { 1 });
 }
 

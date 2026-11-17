@@ -169,7 +169,7 @@ pub fn grade(expect_tunnel: bool, trace: Option<&Result<Trace, String>>, main: O
     if download_ok == Some(false) {
         return Grade::Bad;
     }
-    // the same scale as the `check` verdict and the live panel (see `stats::level`)
+    // the same scale as the `check` verdict (see `stats::level`)
     match stats::level(s) {
         stats::Level::Bad => Grade::Bad,
         stats::Level::Fair => Grade::Fair,

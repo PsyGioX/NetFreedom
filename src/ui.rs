@@ -315,9 +315,46 @@ pub fn wait_spin<T>(label: &str, timeout: std::time::Duration, mut poll: impl Fn
     res
 }
 
+/// Runs `work` on another thread and shows a spinner with the elapsed seconds until it is done.
+/// For jobs that print nothing for a long while: a screen that does not change for half a minute
+/// is taken for a freeze (and people press keys). A panic inside `work` goes on in the caller.
+pub fn spin_task<T: Send>(label: &str, work: impl FnOnce() -> T + Send) -> T {
+    use std::io::IsTerminal;
+    let tty = io::stdout().is_terminal();
+    let frames = ['|', '/', '-', '\\'];
+    std::thread::scope(|s| {
+        let job = s.spawn(work);
+        let t0 = std::time::Instant::now();
+        let mut i = 0;
+        while !job.is_finished() {
+            if tty {
+                print!("\r  {} {label} ({} с)  ", paint(CYAN, &frames[i % 4].to_string()), t0.elapsed().as_secs());
+                flush();
+            }
+            i += 1;
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        if tty {
+            print!("\r{}\r", " ".repeat(visible_len(label) + 24));
+            flush();
+        }
+        match job.join() {
+            Ok(v) => v,
+            Err(e) => std::panic::resume_unwind(e),
+        }
+    })
+}
+
 #[cfg(test)]
 mod ui_tests {
     use super::*;
+
+    #[test]
+    fn spin_task_returns_the_result_and_passes_a_panic_on() {
+        assert_eq!(spin_task("t", || 6 * 7), 42);
+        let r = std::panic::catch_unwind(|| spin_task("t", || -> u8 { panic!("boom") }));
+        assert!(r.is_err());
+    }
 
     #[test]
     fn visible_width_ignores_colours() {

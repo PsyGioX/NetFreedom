@@ -92,6 +92,9 @@ pub fn split_args(args: &[String]) -> Result<(Capture, Vec<String>), String> {
             cap.raw = Some(parse_wfraw(v)?);
         } else if a.starts_with("--wf-") {
             return Err(format!("unsupported capture option {a}"));
+        } else if a.starts_with("--nf-") {
+            // NetFreedom's own options (masked fakes) belong to the built-in engine; nfqws would
+            // refuse them and sends the strategy's static fakes instead
         } else {
             rest.push(a.clone());
         }
@@ -208,6 +211,14 @@ mod tests {
         assert!(r.contains("ip6 daddr { 2606:4700::-2606:4700:ffff:ffff:ffff:ffff:ffff:ffff }"), "{r}");
         assert!(!r.contains("ct original"));
         assert!(!ruleset(&cap, 200, false, false).contains("oifname"));
+    }
+
+    #[test]
+    fn netfreedoms_own_options_never_reach_nfqws() {
+        let args: Vec<String> = ["--wf-tcp=443", "--filter-tcp=443", "--dpi-desync=fake", "--nf-mask=chrome,ya.ru,vk.com", "--dpi-desync-repeats=3"].iter().map(|x| x.to_string()).collect();
+        let (cap, rest) = split_args(&args).unwrap();
+        assert_eq!(cap.tcp.as_deref(), Some("443"));
+        assert_eq!(rest, ["--filter-tcp=443", "--dpi-desync=fake", "--dpi-desync-repeats=3"], "nfqws would refuse --nf-mask and exit");
     }
 
     #[test]

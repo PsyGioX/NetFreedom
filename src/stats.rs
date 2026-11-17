@@ -33,7 +33,7 @@ pub struct Summary {
 }
 
 /// ONE set of thresholds for every place that judges a link: the `check` verdict, the quality
-/// grade after `start` and the live panel. They used to differ (5/10 in the verdict, 6/15 in the
+/// grade after `start`. They used to differ (5/10 in the verdict, 6/15 in the
 /// grade, 8 in the panel), so the same measurement got three different opinions.
 pub const JITTER_EXCELLENT_MS: f64 = 5.0;
 /// Up to this jitter a link is fine for most games; above it, it is merely tolerable.
@@ -142,41 +142,6 @@ pub fn reliable(s: &Summary) -> bool {
     s.sent >= 5 && s.received >= 3 && s.received * 2 >= s.sent
 }
 
-/// Rolling window of the latest probes (`None` = lost); feeds the live panel.
-pub struct Window {
-    cap: usize,
-    v: std::collections::VecDeque<Option<f64>>,
-}
-
-impl Window {
-    pub const fn new(cap: usize) -> Self {
-        Self { cap, v: std::collections::VecDeque::new() }
-    }
-    pub fn push(&mut self, t: Option<f64>) {
-        if self.v.len() == self.cap {
-            self.v.pop_front();
-        }
-        self.v.push_back(t);
-    }
-    pub fn len(&self) -> usize {
-        self.v.len()
-    }
-    pub fn clear(&mut self) {
-        self.v.clear();
-    }
-    /// `None` until something answered.
-    pub fn summary(&self) -> Option<Summary> {
-        let times: Vec<f64> = self.v.iter().flatten().copied().collect();
-        summarize(&times, self.v.len() as u32)
-    }
-    pub fn loss_pct(&self) -> f64 {
-        if self.v.is_empty() {
-            return 0.0;
-        }
-        round1(100.0 * self.v.iter().filter(|t| t.is_none()).count() as f64 / self.v.len() as f64)
-    }
-}
-
 /// True when the tail is long enough to deserve a hint about periodic spikes.
 pub fn long_tail(s: &Summary) -> bool {
     s.received > 1 && s.p95 - s.median > TAIL_LONG_MS
@@ -187,15 +152,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn window_and_reliability() {
-        let mut w = Window::new(4);
-        assert!(w.summary().is_none());
-        for t in [Some(10.0), None, Some(12.0), Some(11.0), Some(13.0)] {
-            w.push(t);
-        }
-        assert_eq!(w.len(), 4); // the oldest probe fell out
-        assert_eq!(w.loss_pct(), 25.0);
-        assert_eq!(w.summary().unwrap().received, 3);
+    fn reliability() {
         let few = summarize(&[10.0, 11.0], 20).unwrap();
         assert!(!reliable(&few), "2 of 20 answers is not a measurement");
         assert!(reliable(&summarize(&[10.0, 11.0, 12.0, 10.0, 11.0], 6).unwrap()));

@@ -89,7 +89,7 @@ mod tests {
 
     #[test]
     fn table_is_complete() {
-        assert_eq!(PROFILES.len(), 8 + 32);
+        assert_eq!(PROFILES.len(), 9 + 37);
         assert!(find(DEFAULT_PROFILE).unwrap().is_dedicated_lean());
         assert!(find(DEFAULT_BYPASS).unwrap().is_bypass());
         assert!(find("BALANCED").is_some());

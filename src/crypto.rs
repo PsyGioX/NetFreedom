@@ -257,8 +257,7 @@ pub fn aes128_gcm_decrypt(key: &[u8; 16], iv: &[u8; 12], aad: &[u8], ct_and_tag:
     Some(out)
 }
 
-/// The encryption direction, used only by tests to build packets.
-#[cfg(test)]
+/// The encryption direction: builds the masked QUIC fakes (`mask`) and the packets of the tests.
 pub fn aes128_gcm_encrypt(key: &[u8; 16], iv: &[u8; 12], aad: &[u8], pt: &[u8]) -> Vec<u8> {
     let aes = Aes128::new(key);
     let h = u128::from_be_bytes(aes.encrypt_block(&[0u8; 16]));

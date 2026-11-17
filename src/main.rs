@@ -122,6 +122,7 @@ fn main() {
     if pause || code != 0 {
         ui::pause_if_own_console();
     }
+    sys::console_restore();
     std::process::exit(code);
 }
 
@@ -375,7 +376,10 @@ fn quality_now() {
     let Some(a) = session::active() else { return };
     println!("{}", ui::tr("Измеряю (обычно 10–15 с, максимум около 30 с)…", "Measuring (usually 10-15 s, at most about 30 s)..."));
     match a.mode {
-        session::Mode::Warp => health::print_report(&health::full_check(&a.target, 25, true)),
+        session::Mode::Warp => {
+            let target = a.target.clone();
+            health::print_report(&ui::spin_task(ui::tr("Измеряю", "Measuring"), move || health::full_check(&target, 25, true)));
+        }
         session::Mode::Bypass => {
             let t0 = std::time::Instant::now();
             let r = nf::web::probe(std::time::Duration::from_secs(8));
