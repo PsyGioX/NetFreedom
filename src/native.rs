@@ -30,6 +30,8 @@ use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentThread, OpenMutexW, SetThreadPriority, THREAD_PRIORITY_HIGHEST};
 
+use self::latency::Latency;
+
 use crate::engine::{Addr, Engine, PacketIo, Plan, Stats};
 use crate::sys::wide;
 
@@ -106,6 +108,8 @@ pub struct Native {
     /// Held while the engine runs: a second process must not open WinDivert again (every fake
     /// would go out twice). Windows releases it when the process ends, however it ends.
     _guard: Guard,
+    /// Timer resolution / power-throttling settings for as long as the engine runs.
+    _latency: Latency,
 }
 
 /// The engine mutex; closing it (also on every early return of `start`) frees the name.
@@ -221,6 +225,9 @@ pub fn start(bin_dir: &str, plan: Plan) -> Result<(), String> {
             set(handle, 2, 16 * 1024 * 1024);
         }
     }
+    // Before the threads exist: timer resolution is process-wide, and the flusher's sleep below
+    // is only as accurate as that resolution.
+    let latency = Latency::engage();
     let shared = Arc::new(Shared { api, handle });
     let io_shared = shared.clone();
     let seed = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0x9E37_79B9);
@@ -232,6 +239,7 @@ pub fn start(bin_dir: &str, plan: Plan) -> Result<(), String> {
         .name("native-engine".into())
         .spawn(move || {
             unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) };
+            latency::prefer_this_thread();
             let mut io = WdIo(io_shared);
             crate::engine::run_shared(&eng, &mut io, &|| t0.elapsed().as_millis() as u64);
             st.store(true, Ordering::Relaxed);
@@ -245,13 +253,13 @@ pub fn start(bin_dir: &str, plan: Plan) -> Result<(), String> {
         .spawn(move || {
             let mut io = WdIo(fl_shared);
             while !st.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(20));
+                std::thread::sleep(Duration::from_millis(FLUSH_TICK_MS));
                 let now = t0.elapsed().as_millis() as u64;
                 eng.lock().unwrap_or_else(|p| p.into_inner()).flush_expired(now, &mut io);
             }
         })
         .ok();
-    *slot = Some(Native { shared, thread: Some(thread), flusher, engine, stop, _guard: guard });
+    *slot = Some(Native { shared, thread: Some(thread), flusher, engine, stop, _guard: guard, _latency: latency });
     Ok(())
 }
 
@@ -287,4 +295,86 @@ pub fn stop() -> Option<Stats> {
     }
     let stats = n.engine.lock().unwrap_or_else(|p| p.into_inner()).stats;
     Some(stats)
+}
+
+/// How often the timer thread looks for held ClientHellos / QUIC Initials whose missing part never
+/// came. It was 20 ms, and with the default Windows timer (about 15.6 ms) a `sleep(20)` really lasts
+/// 31 ms: that much was added to a held first packet. A scan of a short list is cheap, so the tick
+/// is short; with the 1 ms timer requested by [`latency`] it is accurate.
+const FLUSH_TICK_MS: u64 = 4;
+
+/// Timing hygiene of the packet path (Windows). None of this touches packets; it only stops Windows
+/// from sleeping, slowing or de-prioritising the process that injects them. Every call is best
+/// effort: an older Windows that does not know a flag just ignores it.
+mod latency {
+    use windows_sys::Win32::Media::{timeBeginPeriod, timeEndPeriod};
+    use windows_sys::Win32::System::Threading::{
+        AvSetMmThreadCharacteristicsW, GetCurrentProcess, GetCurrentThread, SetPriorityClass, SetProcessInformation, SetThreadInformation,
+        ABOVE_NORMAL_PRIORITY_CLASS, PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION, PROCESS_POWER_THROTTLING_STATE, ProcessPowerThrottling,
+        THREAD_POWER_THROTTLING_CURRENT_VERSION, THREAD_POWER_THROTTLING_EXECUTION_SPEED, THREAD_POWER_THROTTLING_STATE, ThreadPowerThrottling,
+    };
+
+    /// Held while the engine runs; dropping it gives the timer back.
+    pub struct Latency {
+        timer: bool,
+    }
+
+    impl Latency {
+        pub fn engage() -> Self {
+            // 1. Efficiency mode ("EcoQoS") and ignored timer requests. Since Windows 10 2004 /
+            //    Windows 11 a process that is minimised or covered (a console behind a full-screen
+            //    game is exactly that) may be run on slow cores at low clocks, and its timer
+            //    request is ignored. StateMask = 0 with the control bit set means "never do that".
+            let state = PROCESS_POWER_THROTTLING_STATE {
+                Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+                ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
+                StateMask: 0,
+            };
+            unsafe {
+                SetProcessInformation(
+                    GetCurrentProcess(),
+                    ProcessPowerThrottling,
+                    &state as *const _ as *const core::ffi::c_void,
+                    std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+                );
+                // 2. A bit above normal: enough to win against browsers and launchers, not
+                //    "realtime" (which can starve the mouse and the audio of the game).
+                SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
+            }
+            // 3. 1 ms timer: accurate sleeps for the timer thread and for delayed fakes.
+            let timer = unsafe { timeBeginPeriod(1) } == 0;
+            Latency { timer }
+        }
+    }
+
+    impl Drop for Latency {
+        fn drop(&mut self) {
+            if self.timer {
+                unsafe { timeEndPeriod(1) };
+            }
+        }
+    }
+
+    /// For the engine thread itself: no efficiency-core throttling, and the multimedia scheduler's
+    /// "Games" class (MMCSS), which keeps ordinary threads from pre-empting a thread that has to
+    /// answer every packet within microseconds.
+    pub fn prefer_this_thread() {
+        let state = THREAD_POWER_THROTTLING_STATE {
+            Version: THREAD_POWER_THROTTLING_CURRENT_VERSION,
+            ControlMask: THREAD_POWER_THROTTLING_EXECUTION_SPEED,
+            StateMask: 0,
+        };
+        unsafe {
+            SetThreadInformation(
+                GetCurrentThread(),
+                ThreadPowerThrottling,
+                &state as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<THREAD_POWER_THROTTLING_STATE>() as u32,
+            );
+            let mut index = 0u32;
+            let task: Vec<u16> = "Games\0".encode_utf16().collect();
+            AvSetMmThreadCharacteristicsW(task.as_ptr(), &mut index);
+        }
+    }
 }

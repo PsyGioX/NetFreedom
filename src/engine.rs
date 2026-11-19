@@ -2445,7 +2445,7 @@ mod tests {
             assert!(rest.iter().all(|a| !a.starts_with("--nf-")), "{}", p.name);
             assert!(rest.iter().any(|a| a.starts_with("--dpi-desync=")), "{}", p.name);
         }
-        assert_eq!(n, 6, "mask, mask-lite, mask-disorder, mask-split, mask-hostfake and warp-mask");
+        assert_eq!(n, 8, "mask, mask-lite, mask-disorder, mask-split, mask-hostfake, mask-hf, mask-hostfake-ts and warp-mask");
     }
 
     #[test]

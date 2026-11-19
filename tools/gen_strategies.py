@@ -337,6 +337,46 @@ TECH.update({
 })
 
 
+# ----------------------------------------------------------------- evidence-driven family (4.6)
+# Two real `tune --bypass` reports on one provider (Nov 2026) split the strategies cleanly:
+#   * all three 8/10 winners (hostfake, alt13, disorder-ya) = `fake` + a split that reorders or
+#     fronts the hello (hostfakesplit / multidisorder) + `ts` fooling + a DOMESTIC name (ya.ru,
+#     mail.ru) both in the fake ClientHello and in the fake host;
+#   * the losers fail on Cloudflare and X with SYN time-outs, and they are exactly the ones with
+#     a google.com decoy (disorder, fdisorder, max, balanced, hostfake-g) or with md5sig added
+#     (alt9, hostfake-vk, hostfake-gu, mask-hostfake). Both factors are confounded in that data,
+#     so each strategy below changes ONE thing against the winner `hostfake`, and `tune` can
+#     separate the factors on the user's own provider.
+HF = lambda host, repeats=5, order="altorder=1", extra=(): [
+    "--dpi-desync=fake,hostfakesplit", f"--dpi-desync-hostfakesplit-mod=host={host}" + (f",{order}" if order else ""),
+    "--dpi-desync-fooling=ts", f"--dpi-desync-repeats={repeats}", MOD(host), *extra,
+]
+DIS = lambda sni, repeats=6: [
+    "--dpi-desync=fake,multidisorder", "--dpi-desync-split-pos=1,midsld",
+    "--dpi-desync-fooling=ts", f"--dpi-desync-repeats={repeats}", MOD(sni),
+]
+TECH.update({
+    "hf-mail": HF("mail.ru"),                   # other domestic name (alt13 uses a fake file instead)
+    "hf-vk": HF("vk.com"),                      # hostfake-vk WITHOUT md5sig: tests the md5sig factor
+    "hf-gosuslugi": HF("gosuslugi.ru"),         # hostfake-gu WITHOUT md5sig
+    "hf-ozon": HF("ozon.ru"),                   # alt9 WITHOUT md5sig
+    "hf-rzd": HF("rzd.ru"),                     # name used for Discord in zapret2 field reports
+    "hf-dzen": HF("dzen.ru"),
+    "hf-r3": HF("ya.ru", repeats=3),            # same as hostfake, a smaller burst
+    "hf-r8": HF("ya.ru", repeats=8),            # same as hostfake, a bigger one
+    "hf-plain-order": HF("ya.ru", order=None),  # hostfake without altorder=1
+    "disorder-mail": DIS("mail.ru"),            # disorder-ya with the other domestic name
+    "disorder-r3": DIS("ya.ru", repeats=3),
+    # the winner, built anew for every connection from a pool of domestic names (Windows engine;
+    # nfqws on Linux ignores --nf-mask and sends the static hostfake)
+    "mask-hf": [*HF("ya.ru", repeats=4), MASK(MASK_RU)],
+    # mask-hostfake without md5sig
+    "mask-hostfake-ts": ["--dpi-desync=hostfakesplit", "--dpi-desync-fooling=ts",
+                         "--dpi-desync-hostfakesplit-mod=host=ya.ru", "--dpi-desync-repeats=4", MASK(MASK_RU)],
+})
+MASKED.update({"mask-hf": MASK_RU, "mask-hostfake-ts": MASK_RU})
+
+
 def quic(repeats, mask=None):
     return ["--dpi-desync=fake", f"--dpi-desync-repeats={repeats}", f"--dpi-desync-fake-quic={GOOGLE_QUIC}",
             *([MASK(mask)] if mask else [])]
@@ -348,7 +388,7 @@ HTTP_RULE = ["--dpi-desync=fake,multisplit", "--dpi-desync-split-pos=method+2", 
 # Our own techniques that send fake packets. Only these get the extra googlevideo rule below: the
 # proven original strategies are kept verbatim, and the split-only ones must stay free of fakes.
 GV_TECHS = {"fakesplit", "fakesplit-lite", "disorder", "max", "disorder-sni", "disorder-ya", "fdisorder", "ttl", "seqfake",
-            "mask", "mask-lite", "mask-disorder"}
+            "mask", "mask-lite", "mask-disorder", "disorder-mail", "disorder-r3"}
 
 # YouTube video comes from googlevideo.com. On some providers (MGTS, Rostelecom in autumn 2026) the
 # page opens while TLS to googlevideo.com never completes with ANY of the general techniques; a
@@ -453,6 +493,24 @@ STRATEGIES = [
      None, lean(quic(4), 6, 2, port_fake="{BIN}stun.bin")),
 ]
 BYPASS = [
+    # evidence order (see "evidence-driven family"): the three measured winners, then the
+    # one-factor variants around them, then everything else in its previous order
+    ("hostfake", "fake ClientHello + hostfakesplit with a domestic name (ya.ru), ts: 8/10 in field reports", "hostfake", 6),
+    ("alt13", "original ALT13: hostfakesplit mail.ru (8/10 in field reports)", "alt13", 6),
+    ("disorder-ya", "fake + out-of-order with a domestic SNI (ya.ru) (8/10 in field reports)", "disorder-ya", 6),
+    ("hf-mail", "like hostfake with the name mail.ru", "hf-mail", 6),
+    ("hf-vk", "like hostfake with the name vk.com (ts only, no md5sig)", "hf-vk", 6),
+    ("hf-gosuslugi", "like hostfake with the name gosuslugi.ru (ts only, no md5sig)", "hf-gosuslugi", 6),
+    ("hf-ozon", "like hostfake with the name ozon.ru (ts only, no md5sig)", "hf-ozon", 6),
+    ("hf-rzd", "like hostfake with the name rzd.ru", "hf-rzd", 6),
+    ("hf-dzen", "like hostfake with the name dzen.ru", "hf-dzen", 6),
+    ("hf-r3", "like hostfake with 3 repeats: a smaller burst per connection", "hf-r3", 3),
+    ("hf-r8", "like hostfake with 8 repeats: for providers that need more noise", "hf-r8", 6),
+    ("hf-plain-order", "like hostfake without altorder=1", "hf-plain-order", 6),
+    ("disorder-mail", "like disorder-ya with the name mail.ru", "disorder-mail", 6),
+    ("disorder-r3", "like disorder-ya with 3 repeats: a smaller burst", "disorder-r3", 3),
+    ("mask-hf", "hostfake built anew for every connection from domestic names (Windows engine)", "mask-hf", 4),
+    ("mask-hostfake-ts", "mask-hostfake without md5sig (ts only)", "mask-hostfake-ts", 4),
     ("balanced", "fake + overlapping split with a harmless SNI (good first try)", "fakesplit", 6),
     ("mask", "balanced geometry, but every fake is built anew like a browser's ClientHello (Windows engine)", "mask", 4),
     ("mask-lite", "mask with 2 fakes and 2 QUIC fakes: the smallest burst per connection", "mask-lite", 2),
@@ -465,11 +523,9 @@ BYPASS = [
     ("disorder", "fake + out-of-order segments (worked in field tests)", "disorder", 11),
     ("max", "fake + fakedsplit, 11 repeats (worked in field tests)", "max", 11),
     ("disorder-sni", "fake + out-of-order, split at the SNI extension", "disorder-sni", 6),
-    ("disorder-ya", "fake + out-of-order with a domestic SNI (ya.ru)", "disorder-ya", 6),
     ("fdisorder", "fake + fake-disorder split (ts)", "fdisorder", 6),
     ("split", "overlapping split only, no fake packets (light, immune to fake bans)", "split", 6),
     ("sni-split", "split at the SNI extension", "sni-split", 6),
-    ("hostfake", "fake ClientHello with a domestic host name (ya.ru)", "hostfake", 6),
     ("hostfake-g", "hostfakesplit with a google.com host, ts (what Flowseal uses for YouTube in 2026)", "hostfake-g", 6),
     ("syndata", "payload inside SYN + out-of-order segments (IPv4)", "syndata", 6),
     ("ttl", "fakes that expire before the server (auto TTL)", "ttl", 6),
@@ -485,7 +541,6 @@ BYPASS = [
     ("alt10", "original ALT10: fake with STUN + 4pda ClientHello", "alt10", 6),
     ("alt11", "original ALT11: fake + multisplit 664, sferum.ru", "alt11", 6),
     ("alt12", "original ALT12: like ALT11 with a different STUN fake", "alt12", 6),
-    ("alt13", "original ALT13: hostfakesplit mail.ru", "alt13", 6),
     ("exp", "original EXP: fake + multisplit 480", "exp", 6),
     ("simple-fake", "original SIMPLE FAKE: plain fake, ts", "simple-fake", 6),
     ("simple-fake-alt", "original SIMPLE FAKE ALT: plain fake, future seq 2", "simple-fake-alt", 6),

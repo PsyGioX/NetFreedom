@@ -170,7 +170,16 @@ impl Scenario {
 
 /// `--quick` for the bypass goal: the strategies that are most often the answer (about a third of
 /// the full run).
-const QUICK_BYPASS: [&str; 12] = ["balanced", "mask", "balanced-lite", "disorder", "max", "hostfake-g", "hostfake", "alt9", "alt11", "alt12", "alt13", "split"];
+const QUICK_BYPASS: [&str; 12] = ["hostfake", "alt13", "disorder-ya", "hf-mail", "hf-vk", "hf-r3", "mask-hf", "balanced", "mask", "disorder", "alt11", "split"];
+
+/// One-factor variants of the strategies that won in field reports (see tools/gen_strategies.py).
+/// They differ from each other only in the TLS technique, which has no effect on the latency of the
+/// WARP handshake, so the game goal skips them (unless `--full`) instead of measuring 13 more
+/// scenarios that cannot differ; the bypass goal runs them all.
+const BYPASS_VARIANTS: [&str; 13] = [
+    "hf-mail", "hf-vk", "hf-gosuslugi", "hf-ozon", "hf-rzd", "hf-dzen", "hf-r3", "hf-r8", "hf-plain-order", "disorder-mail", "disorder-r3", "mask-hf",
+    "mask-hostfake-ts",
+];
 
 /// Builds the list of scenarios for the given options (pure, unit-tested). Every strategy is unique
 /// (the table is deduplicated), so nothing is measured twice.
@@ -188,7 +197,7 @@ pub fn scenarios(a: &TuneArgs) -> Vec<Scenario> {
             }
         } else if p.is_dedicated_lean() {
             v.push(Scenario { label: p.name.into(), profile: Some(p), mode: 1, penalty: 0.0, bypass_goal: false });
-        } else if !a.quick {
+        } else if !a.quick && (a.full || !BYPASS_VARIANTS.contains(&p.name)) {
             v.push(Scenario { label: format!("{} [low latency]", p.name), profile: Some(p), mode: 1, penalty: 2.0, bypass_goal: false });
             if a.full {
                 v.push(Scenario { label: format!("{} [compatibility]", p.name), profile: Some(p), mode: 2, penalty: 5.0, bypass_goal: false });
@@ -208,6 +217,25 @@ pub struct Result1 {
     pub web: Vec<WebResult>,
     pub note: String,
     pub score: f64,
+}
+
+/// How many scenarios in a row may come back "connected, but no ICMP replies" before `tune` assumes
+/// that ICMP itself went silent (and not that three strategies in a row broke it).
+const ICMP_LOST_STREAK: usize = 3;
+
+/// A scenario whose tunnel was verified but whose fixed ICMP measurement got no answer at all.
+fn icmp_lost(r: &Result1) -> bool {
+    r.connected && r.summary.is_none() && r.note.starts_with("no ICMP replies")
+}
+
+/// Sleeps `secs` seconds in one-second steps so that Ctrl+C is honoured.
+fn cooldown(secs: u64) {
+    for _ in 0..secs {
+        if sys::interrupted() {
+            return;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
 }
 
 fn blank(sc: &Scenario) -> Result1 {
@@ -588,7 +616,16 @@ pub fn run(layout: &Layout, mut a: TuneArgs) -> Result<(), String> {
     let total = list.len();
     let mut results: Vec<Result1> = Vec::with_capacity(total);
     let mut stopped = false;
-    for (i, sc) in list.iter().enumerate() {
+    // The measuring method is fixed (ICMP or TCP) so that the numbers compare. If ICMP then stops
+    // being answered in the middle of a run (an ICMP rate limit at the target is the likely reason;
+    // seen in a real 47-scenario report where scenarios 24-47 all said "no ICMP replies"), every
+    // later scenario is wasted. Wait once, repeat the scenarios that were lost, and if that does
+    // not help, stop and say so instead of burning minutes on results that cannot be compared.
+    let mut dead_streak = 0usize;
+    let mut cooled = false;
+    let mut i = 0usize;
+    while i < list.len() {
+        let sc = &list[i];
         if sys::interrupted() {
             stopped = true;
             break;
@@ -614,6 +651,41 @@ pub fn run(layout: &Layout, mut a: TuneArgs) -> Result<(), String> {
         if let Some(best) = sorted.first().filter(|b| b.score.is_finite()) {
             ui::say(&format!("        leader so far: {}", best.scenario.label));
         }
+        if !a.bypass {
+            dead_streak = if icmp_lost(&results[results.len() - 1]) { dead_streak + 1 } else { 0 };
+            if dead_streak >= ICMP_LOST_STREAK {
+                if !cooled {
+                    cooled = true;
+                    ui::say(&format!(
+                        "        {}",
+                        ui::tr(
+                            "ICMP перестал отвечать (похоже на ограничение частоты у цели). Жду 90 с и повторяю потерянные сценарии…",
+                            "ICMP stopped being answered (looks like a rate limit at the target). Waiting 90 s, then repeating the lost scenarios..."
+                        )
+                    ));
+                    cooldown(90);
+                    for _ in 0..ICMP_LOST_STREAK {
+                        results.pop();
+                    }
+                    i = i + 1 - ICMP_LOST_STREAK;
+                    dead_streak = 0;
+                    continue;
+                }
+                ui::say(&format!(
+                    "        {}",
+                    ui::tr(
+                        "ICMP по-прежнему молчит: остальные сценарии нельзя сравнить с уже измеренными. Останавливаюсь. Подождите несколько минут и продолжите через --only, либо укажите --target <IP игрового сервера> (он измеряется по TCP, если ICMP закрыт).",
+                        "ICMP is still silent: the remaining scenarios cannot be compared with the measured ones. Stopping. Wait a few minutes and continue with --only, or pass --target <game server IP> (measured over TCP when ICMP is closed)."
+                    )
+                ));
+                for _ in 0..ICMP_LOST_STREAK {
+                    results.pop(); // the unmeasurable ones carry no information
+                }
+                stopped = true;
+                break;
+            }
+        }
+        i += 1;
     }
     rank(&mut results);
 
@@ -745,14 +817,14 @@ mod tests {
     fn scenario_lists_have_no_duplicates() {
         let all = scenarios(&TuneArgs::default());
         // baseline + 9 WARP strategies + 37 bypass strategies (low latency)
-        assert_eq!(all.len(), 1 + 9 + 37);
+        assert_eq!(all.len(), 1 + 9 + 37, "the 13 one-factor variants are not measured for the game goal");
         assert!(all[0].profile.is_none());
         let labels: std::collections::HashSet<_> = all.iter().map(|s| s.label.clone()).collect();
         assert_eq!(labels.len(), all.len());
         assert_eq!(scenarios(&TuneArgs { quick: true, ..Default::default() }).len(), 1 + 9);
-        assert_eq!(scenarios(&TuneArgs { full: true, ..Default::default() }).len(), 1 + 9 + 74);
+        assert_eq!(scenarios(&TuneArgs { full: true, ..Default::default() }).len(), 1 + 9 + 100);
         let b = scenarios(&TuneArgs { bypass: true, ..Default::default() });
-        assert_eq!(b.len(), 1 + 37, "bypass goal: baseline + the 37 bypass strategies, no WARP strategies");
+        assert_eq!(b.len(), 1 + 50, "bypass goal: baseline + the 50 bypass strategies, no WARP strategies");
         assert!(b.iter().skip(1).all(|s| s.bypass_goal && s.profile.unwrap().is_bypass()));
         let q = scenarios(&TuneArgs { bypass: true, quick: true, ..Default::default() });
         assert_eq!(q.len(), 1 + QUICK_BYPASS.len(), "every quick name must exist in the table");
@@ -773,7 +845,7 @@ mod tests {
         let s = scenarios(&TuneArgs::default());
         assert_eq!(s[1].command(), "netfreedom start --strategy warp");
         let b = scenarios(&TuneArgs { bypass: true, ..Default::default() });
-        assert_eq!(b[1].command(), "netfreedom start --bypass --strategy balanced");
+        assert_eq!(b[1].command(), "netfreedom start --bypass --strategy hostfake", "the measured winners come first");
     }
 
     #[test]
@@ -781,6 +853,21 @@ mod tests {
         let b = scenarios(&TuneArgs { bypass: true, ..Default::default() });
         let plan = b[1].plan().unwrap();
         assert_eq!(plan.gf.effective(), ("12", "12"));
+    }
+
+    #[test]
+    fn a_silent_icmp_is_told_apart_from_a_broken_scenario() {
+        let mut lost = res("a", f64::INFINITY);
+        lost.connected = true;
+        lost.note = "no ICMP replies from 1.1.1.1".into();
+        assert!(icmp_lost(&lost));
+        let mut not_connected = res("b", f64::INFINITY);
+        not_connected.note = "no ICMP replies from 1.1.1.1".into();
+        assert!(!icmp_lost(&not_connected), "a scenario that never connected is its own failure");
+        let mut other = res("c", f64::INFINITY);
+        other.connected = true;
+        other.note = "cannot resolve an IPv4 address".into();
+        assert!(!icmp_lost(&other));
     }
 
     #[test]

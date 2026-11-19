@@ -46,7 +46,7 @@ impl Profile {
 /// Name of the recommended default strategy for games through WARP.
 pub const DEFAULT_PROFILE: &str = "warp";
 /// Name of the recommended first try for bypassing blocks without WARP.
-pub const DEFAULT_BYPASS: &str = "balanced";
+pub const DEFAULT_BYPASS: &str = "hostfake";
 
 /// Old names (from the BAT/Rust 2.x launchers and their config files) -> current strategies.
 /// "general (ALT2)" is now simply `alt2`; the few that were merged map to their equivalent.
@@ -89,7 +89,7 @@ mod tests {
 
     #[test]
     fn table_is_complete() {
-        assert_eq!(PROFILES.len(), 9 + 37);
+        assert_eq!(PROFILES.len(), 9 + 50);
         assert!(find(DEFAULT_PROFILE).unwrap().is_dedicated_lean());
         assert!(find(DEFAULT_BYPASS).unwrap().is_bypass());
         assert!(find("BALANCED").is_some());

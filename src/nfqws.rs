@@ -136,6 +136,42 @@ fn log_tail() -> String {
     lines[lines.len().saturating_sub(6)..].join("\n")
 }
 
+/// nfqws drops root and, by default, becomes the unprivileged uid 0x7FFFFFFF. It opens the lists
+/// once as root and then checks them again as that uid, so if they sit in a place that uid cannot
+/// reach, it stops with "file open test: Permission denied". That is exactly what a folder unpacked
+/// into a Debian home directory (mode 0700) does. Returns the uid:gid to hand to `--uid=` in that
+/// case, or None when nfqws's own default works (or the caller has already chosen one).
+///
+/// * the lists are reachable by everybody -> None (keep the safest default, an unprivileged uid);
+/// * otherwise the owner of the lists folder (the person who unpacked it, who can read it by
+///   definition) is used, which is still not root;
+/// * a root-owned folder nobody else can enter (for example inside /root) has no unprivileged
+///   owner to fall back to, so root is kept (0:0, no drop) rather than failing to start.
+fn drop_target(layout: &Layout, nf_args: &[String]) -> Option<(u32, u32)> {
+    if nf_args.iter().any(|a| a.starts_with("--uid") || a.starts_with("--user")) {
+        return None;
+    }
+    let lists = std::path::PathBuf::from(&layout.lists);
+    if lists_reachable_by_everyone(&lists) {
+        return None;
+    }
+    use std::os::unix::fs::MetadataExt;
+    let md = std::fs::metadata(&lists).ok()?;
+    Some((md.uid(), md.gid()))
+}
+
+/// Every folder on the way to `lists` can be entered by "others", `lists` can be listed, and every
+/// file in it can be read.
+fn lists_reachable_by_everyone(lists: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let others = |p: &std::path::Path, bit: u32| std::fs::metadata(p).is_ok_and(|m| m.mode() & bit != 0);
+    let chain_ok = lists.ancestors().filter(|p| !p.as_os_str().is_empty()).all(|p| others(p, 0o001));
+    if !chain_ok || !others(lists, 0o004) {
+        return false;
+    }
+    std::fs::read_dir(lists).is_ok_and(|rd| rd.flatten().all(|e| e.path().is_dir() || others(&e.path(), 0o004)))
+}
+
 /// Starts nfqws, waits until it has bound the queue, then installs the nft rules.
 pub fn start(layout: &Layout, args: &[String], include_lo: bool) -> Result<(), String> {
     // ZW_NFT_INCLUDE_LO=1 is a test hook: lets a network namespace without real NICs exercise the rules.
@@ -148,9 +184,11 @@ pub fn start(layout: &Layout, args: &[String], include_lo: bool) -> Result<(), S
     let log = open_log()?;
     let log2 = log.try_clone().map_err(|e| e.to_string())?;
     let mut cmd = Command::new(&exe);
-    cmd.arg(format!("--qnum={QNUM}"))
-        .arg(format!("--dpi-desync-fwmark={FWMARK}"))
-        .args(&nf_args)
+    cmd.arg(format!("--qnum={QNUM}")).arg(format!("--dpi-desync-fwmark={FWMARK}"));
+    if let Some((uid, gid)) = drop_target(layout, &nf_args) {
+        cmd.arg(format!("--uid={uid}:{gid}"));
+    }
+    cmd.args(&nf_args)
         .current_dir(&layout.bin)
         .stdin(Stdio::null())
         .stdout(log)
@@ -224,6 +262,30 @@ pub fn dump_log() -> String {
 mod log_tests {
     use super::*;
     use std::os::unix::fs::{MetadataExt, symlink};
+
+    #[test]
+    fn lists_in_a_private_home_get_their_owner_as_the_nfqws_uid() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let root = std::env::temp_dir().join(format!("nf-uid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let lists = root.join("lists");
+        std::fs::create_dir_all(&lists).unwrap();
+        std::fs::write(lists.join("list-general.txt"), "example.com\n").unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&lists, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(lists.join("list-general.txt"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        let layout = Layout::at(root.clone());
+        assert_eq!(drop_target(&layout, &[]), None, "world-readable lists keep nfqws's unprivileged default");
+
+        // a private parent (Debian's 0700 home) hides the lists from the default uid
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let md = std::fs::metadata(&lists).unwrap();
+        assert_eq!(drop_target(&layout, &[]), Some((md.uid(), md.gid())));
+        // an explicit choice by the caller is never overridden
+        assert_eq!(drop_target(&layout, &["--uid=1000:1000".to_string()]), None);
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn log_is_private_and_never_follows_a_symlink() {
