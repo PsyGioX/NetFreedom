@@ -89,7 +89,7 @@ netfreedom verify                проверка целостности пак�
 | Свои | 21 | `balanced`, `balanced-lite`, `disorder`, `max`, `hostfake-vk`, `hostfake-gu`, `hostfake-g`, `split`, `sni-split`, `mask*` |
 | Исходный набор | 16 | `general`, `alt`…`alt13`, `exp`, `simple-fake*`, `fta-alt` (проверенные стратегии Flowseal, дословно) |
 
-**Сервисы.** Домены Instagram, X, Telegram, WhatsApp, Signal, Viber, Snapchat, TikTok, Roblox, LinkedIn, Speedtest, а также Vercel и Netlify лежат в `lists/`. Свои добавляйте в `list-general-user.txt`. Для Telegram есть ещё `lists/ipset-social.txt` с диапазонами дата-центров (сверены с официальным `cidr.txt`; проверить самому: `python3 tools/check_social_ranges.py`). Если сервис закрыт по IP, а не по имени, список не поможет.
+**Сервисы.** Домены Instagram, X, Telegram, WhatsApp, Signal, Viber, Snapchat, TikTok, Roblox, LinkedIn, Speedtest, Википедия и Викимедиа (wikipedia.org, wikimedia.org и сестринские проекты), а также Vercel и Netlify лежат в `lists/`. Свои добавляйте в `list-general-user.txt`. Для Telegram есть ещё `lists/ipset-social.txt` с диапазонами дата-центров (сверены с официальным `cidr.txt`; проверить самому: `python3 tools/check_social_ranges.py`). Если сервис закрыт по IP, а не по имени, список не поможет.
 
 ### 👁 Без мониторинга: меньше следов в трафике
 

@@ -114,7 +114,7 @@ mod tests {
         fs::write(root.join("lists").join("list-general-user.txt"), "my.example\n").unwrap();
         l.ensure_user_lists().unwrap();
         let social = fs::read_to_string(root.join("lists").join("list-social.txt")).unwrap();
-        for d in ["instagram.com", "cdninstagram.com", "x.com", "twimg.com", "t.co", "telegram.org", "t.me", "whatsapp.com", "whatsapp.net"] {
+        for d in ["instagram.com", "cdninstagram.com", "x.com", "twimg.com", "t.co", "telegram.org", "t.me", "whatsapp.com", "whatsapp.net", "wikipedia.org", "wikimedia.org"] {
             assert!(social.lines().any(|x| x.trim() == d), "{d} missing");
         }
         let ipset = fs::read_to_string(root.join("lists").join("ipset-social.txt")).unwrap();

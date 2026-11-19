@@ -300,7 +300,7 @@ TECH.update({
 # (nftrules::split_args strips it) and sends the static fakes that stay in the strategy as they are.
 MASK_RU = ("ya.ru,yandex.ru,dzen.ru,vk.com,mail.ru,ok.ru,gosuslugi.ru,sberbank.ru,ozon.ru,"
            "wildberries.ru,avito.ru,rutube.ru,2gis.ru,kinopoisk.ru")
-MASK_WORLD = "www.google.com,www.microsoft.com,www.apple.com,www.cloudflare.com,www.wikipedia.org,www.bing.com"
+MASK_WORLD = "www.google.com,www.microsoft.com,www.apple.com,www.cloudflare.com,www.amazon.com,www.bing.com"
 MASK_MIX = MASK_RU + "," + MASK_WORLD
 MASK = lambda pool: f"--nf-mask={pool}"
 

@@ -375,7 +375,7 @@ pub fn lookup_time(name: &str, limit: Duration) -> Option<Duration> {
 }
 
 /// Names that really exist and are not wildcarded, asked after the cache was flushed.
-const CANARIES: [&str; 2] = ["www.cloudflare.com", "www.wikipedia.org"];
+const CANARIES: [&str; 2] = ["www.cloudflare.com", "www.microsoft.com"];
 
 fn verify(limit: Duration) -> Option<Duration> {
     CANARIES.iter().find_map(|h| lookup_time(h, limit))
