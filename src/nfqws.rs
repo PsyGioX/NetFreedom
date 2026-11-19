@@ -172,11 +172,25 @@ fn lists_reachable_by_everyone(lists: &std::path::Path) -> bool {
     std::fs::read_dir(lists).is_ok_and(|rd| rd.flatten().all(|e| e.path().is_dir() || others(&e.path(), 0o004)))
 }
 
+/// An archive that went through Windows (or a zip tool that does not store modes) unpacks the
+/// bundled `nfqws` without the execute bit, and spawning it then fails with "Permission denied".
+/// We run as root here, so give the file back the bit instead of sending the user to `chmod`.
+fn ensure_executable(exe: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(md) = fs::metadata(exe) {
+        let mode = md.permissions().mode();
+        if mode & 0o111 == 0 {
+            let _ = fs::set_permissions(exe, fs::Permissions::from_mode(mode | 0o755));
+        }
+    }
+}
+
 /// Starts nfqws, waits until it has bound the queue, then installs the nft rules.
 pub fn start(layout: &Layout, args: &[String], include_lo: bool) -> Result<(), String> {
     // ZW_NFT_INCLUDE_LO=1 is a test hook: lets a network namespace without real NICs exercise the rules.
     let include_lo = include_lo || std::env::var_os("ZW_NFT_INCLUDE_LO").is_some();
     let exe = layout.nfqws_exe().ok_or("nfqws not found: put it into bin/ (or bin/linux-<arch>/) or install it into PATH")?;
+    ensure_executable(&exe);
     let (cap, nf_args) = nftrules::split_args(args)?;
     nft_bin()?;
     stop_all(); // never stack on top of a previous run
@@ -285,6 +299,17 @@ mod log_tests {
         assert_eq!(drop_target(&layout, &["--uid=1000:1000".to_string()]), None);
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_bundled_engine_without_the_execute_bit_gets_it_back() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = std::env::temp_dir().join(format!("nf-exec-{}", std::process::id()));
+        std::fs::write(&f, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+        ensure_executable(&f);
+        assert_ne!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o111, 0);
+        let _ = std::fs::remove_file(&f);
     }
 
     #[test]
