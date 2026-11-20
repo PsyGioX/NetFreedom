@@ -23,7 +23,6 @@ description = "NetFreedom - open, local, reversible tool for reaching the open I
 license = "GPL-3.0-only"
 authors = ["Sergey (PsyGioX) <https://github.com/PsyGioX>"]
 repository = "https://github.com/PsyGioX/NetFreedom"
-homepage = "https://github.com/PsyGioX/NetFreedom"
 readme = "README.md"
 keywords = ["dpi", "cloudflare-warp", "windivert", "nfqws"]
 build = "build.rs"
