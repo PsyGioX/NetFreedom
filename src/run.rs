@@ -229,6 +229,51 @@ pub fn launch(layout: &Layout, plan: &Plan, a: &StartArgs, quiet: bool) -> Resul
     Ok(())
 }
 
+/// Daemon check + first-run registration, with the engine already up.
+///
+/// The WARP-only strategies ("lean": warp-lowburst, warp-esports, ...) divert just the QUIC/UDP
+/// handshake. Registering a new WARP identity is plain HTTPS over TCP to api.cloudflareclient.com,
+/// which those strategies do not touch, so on a filtered network it fails with "Failed to
+/// communicate with the WARP API". In that case the engine is restarted once with the default
+/// bypass strategy (TCP + QUIC), the identity is registered, and the lean strategy is started
+/// again. Registration is stored by the daemon, so this only happens on the first run.
+pub fn prepare_warp(layout: &Layout, plan: &Plan, a: &StartArgs, warp: &Warp) -> Result<Option<String>, String> {
+    match warp.prepare() {
+        Err(e) if plan.lean && !e.contains("warp-svc") && !warp.is_registered() => {
+            println!(
+                "\n{}",
+                tr(
+                    "Регистрация WARP не прошла: стратегия охватывает только QUIC, а регистрация идёт по HTTPS (TCP). Повторяю с обходом TCP…",
+                    "WARP registration failed: this strategy only covers QUIC, but registration uses HTTPS (TCP). Retrying with the TCP bypass..."
+                )
+            );
+            backend::stop_all();
+            let mut reg = plan.clone();
+            reg.profile = profiles::find(DEFAULT_BYPASS).expect("default bypass strategy exists");
+            reg.lean = false;
+            reg.gf = GameFilter::compatibility();
+            let mut result = launch(layout, &reg, a, true).and_then(|_| warp.prepare());
+            if result.is_err() {
+                // one more attempt after the engine settles
+                std::thread::sleep(Duration::from_secs(2));
+                result = warp.prepare();
+            }
+            backend::stop_all();
+            launch(layout, plan, a, true)?;
+            result.map_err(|e| {
+                format!(
+                    "{e}\n{}",
+                    tr(
+                        "Подсказка: зарегистрируйтесь вручную при включённом обходе (`netfreedom start --bypass`, затем `warp-cli registration new`) и запустите игровой режим снова; либо проверьте дату/время и DNS.",
+                        "Hint: register manually while the bypass runs (`netfreedom start --bypass`, then `warp-cli registration new`) and start the game mode again; also check the system date/time and DNS."
+                    )
+                )
+            })
+        }
+        other => other,
+    }
+}
+
 /// Disconnect WARP and stop the engine. Idempotent, silent on success.
 pub fn cleanup_all() {
     if let Some(w) = Warp::locate() {
@@ -377,7 +422,7 @@ pub fn start(layout: &Layout, a: StartArgs) -> Result<(), String> {
 
         // Daemon check and (first run) registration talk to Cloudflare, so they come AFTER the
         // engine: with the WARP endpoints filtered, registering without it fails.
-        match warp.prepare() {
+        match prepare_warp(layout, &plan, &a, &warp) {
             Ok(Some(note)) => println!("{note}"),
             Ok(None) => {}
             Err(e) => {

@@ -57,6 +57,11 @@ impl Warp {
     /// Runs `warp-cli <args>` without a console window. Returns (success, combined output).
     pub fn run(&self, args: &[&str]) -> (bool, String) {
         let mut cmd = Command::new(&self.cli);
+        // Linux: every warp-cli command that needs the Terms of Service (tunnel protocol, connect,
+        // registration) refuses to run without a TTY unless --accept-tos is passed. The daemon is
+        // started by us, never by a prompt, so accept for all calls.
+        #[cfg(unix)]
+        cmd.arg("--accept-tos");
         cmd.args(args).stdin(Stdio::null());
         #[cfg(windows)]
         {
@@ -97,16 +102,36 @@ impl Warp {
                     std::thread::sleep(Duration::from_millis(300));
                 }
             }
-            let (ok, reg) = self.run(&["registration", "show"]);
-            if !ok || reg.contains("Missing") {
-                let (ok2, out) = self.run(&["--accept-tos", "registration", "new"]);
-                if !ok2 {
-                    return Err(format!("warp-cli registration new failed: {out}"));
+            if !self.is_registered() {
+                // The WARP API (api.cloudflareclient.com) is plain HTTPS over TCP and is sometimes
+                // flaky or filtered: try a few times before giving up.
+                let mut last = String::new();
+                let mut done = false;
+                for attempt in 0..3 {
+                    if attempt > 0 {
+                        std::thread::sleep(Duration::from_secs(2 + 2 * attempt as u64));
+                    }
+                    let (ok2, out) = self.run(&["registration", "new"]);
+                    if ok2 || self.is_registered() {
+                        done = true;
+                        break;
+                    }
+                    last = out;
+                }
+                if !done {
+                    return Err(format!("warp-cli registration new failed: {last}"));
                 }
                 note = Some("registered a new free WARP identity".to_owned());
             }
             Ok(note)
         }
+    }
+
+    /// True when this device already has a WARP identity (`warp-cli registration show` works).
+    /// A missing registration is the only thing that needs the Cloudflare API before connecting.
+    pub fn is_registered(&self) -> bool {
+        let (ok, reg) = self.run(&["registration", "show"]);
+        ok && !reg.contains("Missing") && !reg.contains("Unable to connect")
     }
 
     pub fn set_masque(&self) -> (bool, String) {

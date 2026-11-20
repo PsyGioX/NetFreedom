@@ -254,6 +254,40 @@ python3 tools/gen_strategies.py > src/profiles_data.rs   # пересборка 
 
 ## 📜 История изменений
 
+<details open>
+<summary><b>4.6.3: Linux: «Please accept the WARP Terms of Service»</b></summary>
+
+**Проблема.** После успешной регистрации `warp-cli tunnel protocol set MASQUE` и `warp-cli connect` на Linux отказывались работать без терминала: «Please accept the WARP Terms of Service by running this command in a TTY or by passing the --accept-tos flag», и туннель не поднимался.
+
+**Что изменено.** На Linux флаг `--accept-tos` теперь передаётся во все вызовы `warp-cli`, а не только в регистрацию. Ручной запуск: `warp-cli --accept-tos connect`.
+</details>
+
+<details>
+<summary><b>4.6.2: регистрация WARP в игровых сценариях и установка на Debian testing</b></summary>
+
+**Проблема.** В игровых сценариях `warp-lowburst`, `warp-esports`, `warp-min` движок перехватывает только QUIC/UDP к Cloudflare. Первая регистрация (`warp-cli registration new`) идёт по HTTPS (TCP) на `api.cloudflareclient.com`, поэтому на фильтруемой сети она заканчивалась ошибкой `Failed to communicate with the WARP API`, и всё останавливалось.
+
+**Что изменено.**
+- Если регистрация не прошла в «узком» сценарии, движок один раз перезапускается со стратегией обхода по умолчанию (TCP и QUIC), WARP регистрируется, затем снова включается выбранный игровой сценарий. Регистрация хранится в демоне, поэтому это происходит только при первом запуске.
+- `warp-cli registration new` повторяется до трёх раз с паузой, а не падает после первой неудачи.
+- Инструкция `install-warp` для Debian учитывает, что в репозитории Cloudflare нет кодовых имён testing/unstable (`forky`, `sid`): подставляется `trixie` либо ставится `.deb` для Debian 13 со страницы бета-релизов.
+
+**Вручную, если автоматика не помогла:** `netfreedom start --bypass`, в другом терминале `warp-cli --accept-tos registration new`, затем остановить и запустить нужный игровой сценарий.
+</details>
+
+<details open>
+<summary><b>4.6.2: регистрация WARP в игровых сценариях и установка на Debian testing</b></summary>
+
+**Проблема.** В игровых сценариях `warp-lowburst`, `warp-esports`, `warp-min` движок перехватывает только QUIC/UDP к Cloudflare. Первая регистрация (`warp-cli registration new`) идёт по HTTPS (TCP) на `api.cloudflareclient.com`, поэтому на фильтруемой сети она заканчивалась ошибкой `Failed to communicate with the WARP API`, и всё останавливалось.
+
+**Что изменено.**
+- Если регистрация не прошла в «узком» сценарии, движок один раз перезапускается со стратегией обхода по умолчанию (TCP и QUIC), WARP регистрируется, затем снова включается выбранный игровой сценарий. Регистрация хранится в демоне, поэтому это происходит только при первом запуске.
+- `warp-cli registration new` повторяется до трёх раз с паузой, а не падает после первой неудачи.
+- Инструкция `install-warp` для Debian учитывает, что в репозитории Cloudflare нет кодовых имён testing/unstable (`forky`, `sid`): подставляется `trixie` либо ставится `.deb` для Debian 13 со страницы бета-релизов.
+
+**Вручную, если автоматика не помогла:** `netfreedom start --bypass`, в другом терминале `warp-cli --accept-tos registration new`, затем остановить и запустить нужный игровой сценарий.
+</details>
+
 <details>
 <summary><b>После 3.3: новая волна блокировок, меньше нагрузки на соединение, новые сервисы</b></summary>
 
