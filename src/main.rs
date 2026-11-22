@@ -47,6 +47,7 @@ USAGE
   netfreedom stop                     emergency stop (WARP and the packet engine)
   netfreedom check [host] [count]     ping / jitter / packet loss (default 1.1.1.1, 50 probes)
       --load                          also test latency UNDER LOAD (bufferbloat): the line is saturated for ~30 s
+  netfreedom sni <site>... [--fix]    is the site restricted by SNI? --fix finds a bypass WITHOUT WARP (--all: try every strategy)
   netfreedom list                     list strategies
   netfreedom doctor [--net [host]]    diagnose the system (drivers, services, lists, conflicts);
                                       --net adds Wi-Fi/cable, background traffic and latency under load
@@ -172,6 +173,7 @@ fn dispatch(args: &[String]) -> (i32, bool) {
             check(rest);
             (0, true)
         }
+        "sni" => sni_cmd(args, rest),
         "install-warp" => {
             install_warp();
             (0, true)
@@ -247,6 +249,62 @@ fn dispatch(args: &[String]) -> (i32, bool) {
             (2, true)
         }
     }
+}
+
+/// `netfreedom sni <site>... [--fix] [--all]`: detection needs no rights; `--fix` starts the packet engine.
+fn sni_cmd(args: &[String], rest: &[String]) -> (i32, bool) {
+    let (code, pause, _) = sni_core(args, rest);
+    (code, pause)
+}
+
+/// Same, and also returns the strategy that `--fix` found (the menu offers to start it).
+fn sni_core(args: &[String], rest: &[String]) -> (i32, bool, Option<String>) {
+    let fix = rest.iter().any(|a| a == "--fix");
+    let all = rest.iter().any(|a| a == "--all");
+    if let Some(bad) = rest.iter().find(|a| a.starts_with("--") && !matches!(a.as_str(), "--fix" | "--all")) {
+        ui::error(&format!("unknown option: {bad}"));
+        return (2, true, None);
+    }
+    let hosts: Vec<String> = rest.iter().filter(|a| !a.starts_with("--")).filter_map(|a| nf::sni::normalize_host(a).or_else(|| { ui::warn(&format!("not a site name: {a}")); None })).collect();
+    if hosts.is_empty() {
+        ui::error(ui::tr("Укажите сайт: netfreedom sni example.com [--fix]", "Give a site: netfreedom sni example.com [--fix]"));
+        return (2, true, None);
+    }
+    if fix && !sys::is_elevated() {
+        if sys::relaunch_elevated(args) {
+            return (0, false, None);
+        }
+        ui::error(needs_admin_msg());
+        return (1, true, None);
+    }
+    let layout = if fix { Layout::discover().ok() } else { None };
+    if fix {
+        sys::install_cleanup_handler(session::cleanup);
+    }
+    let mut code = 0;
+    let mut found = None;
+    for h in hosts.iter().take(10) {
+        println!("{} {h}...", ui::tr("Проверяю", "Checking"));
+        let r = nf::sni::detect(h, std::time::Duration::from_secs(4));
+        nf::sni::print(&r);
+        if !fix || !r.verdict.fixable() {
+            continue;
+        }
+        let Some(l) = &layout else { continue };
+        match nf::sni::fix(l, &r, all) {
+            Ok(name) => {
+                ui::ok(&format!("{}: {name}", ui::tr("Подходит стратегия", "Working strategy")));
+                println!("{}", ui::tr("Запуск без WARP:", "Start without WARP:"));
+                println!("  netfreedom start --bypass --strategy {name}");
+                found = Some(name);
+            }
+            Err(e) => {
+                ui::error(&e);
+                code = 1;
+            }
+        }
+    }
+    (code, true, found)
 }
 
 fn finish(r: Result<(), String>, pause: bool) -> (i32, bool) {
@@ -422,6 +480,7 @@ fn menu(layout: &Layout) -> (i32, bool) {
             menu_item("2", ui::tr("Разблокировка сайтов, YouTube, Discord", "Unblock sites, YouTube, Discord"), ui::tr("без WARP", "no WARP"));
             menu_item("3", ui::tr("Подобрать лучшую стратегию (tune)", "Find the best strategy (tune)"), ui::tr("тестирует всё на вашем соединении", "tests everything on your connection"));
         }
+        menu_item("N", ui::tr("Проверить сайт на блокировку по SNI", "Check a site for SNI blocking"), ui::tr("и найти обход без WARP", "and find a bypass without WARP"));
         menu_item("4", ui::tr("Проверка пинга и потерь", "Check ping and packet loss"), "");
         menu_item("5", ui::tr("IP игрового сервера", "Game server IP"), &current_target(layout));
         menu_item("6", ui::tr("Диагностика (doctor)", "Diagnostics (doctor)"), "");
@@ -436,7 +495,7 @@ fn menu(layout: &Layout) -> (i32, bool) {
         }
         menu_item("0", ui::tr("Выход", "Exit"), if active { ui::tr("остановит всё", "stops everything") } else { "" });
         println!();
-        let keys = if active { "13456789DSL0" } else { "123456789DSLU0" };
+        let keys = if active { "13456789NDSL0" } else { "123456789NDSLU0" };
         match (ui::choice(ui::tr("Выбор: ", "Select: "), keys), active) {
             ('1', true) => {
                 run::stop_session();
@@ -453,6 +512,24 @@ fn menu(layout: &Layout) -> (i32, bool) {
                 let a: Vec<String> = if bypass { vec!["--bypass".to_string()] } else { Vec::new() };
                 let _ = tune_cmd(layout, &a);
                 sys::set_title("NetFreedom");
+                pause_back();
+            }
+            ('N', _) => {
+                let site = ui::ask(ui::tr("Сайт (например example.com)", "Site (for example example.com)"), "");
+                if !site.is_empty() {
+                    let fix = !active && ui::yes_no(ui::tr("Если ограничен по SNI, подобрать обход без WARP?", "If it is SNI-restricted, find a bypass without WARP?"));
+                    let mut a = vec![site];
+                    if fix {
+                        a.push("--fix".into());
+                    }
+                    let (_, _, found) = sni_core(&a, &a);
+                    if let Some(name) = found {
+                        if ui::yes_no(ui::tr("Запустить обход сейчас (без WARP)?", "Start the bypass now (no WARP)?")) {
+                            start_from_menu(layout, &["--bypass", "--strategy", &name, "--mode", "1"]);
+                            continue;
+                        }
+                    }
+                }
                 pause_back();
             }
             ('4', _) => {

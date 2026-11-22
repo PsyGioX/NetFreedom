@@ -36,6 +36,7 @@ pub mod ipset;
 pub mod mask;
 pub mod netdiag;
 pub mod session;
+pub mod sni;
 pub mod nftrules;
 pub mod paths;
 pub mod probe;

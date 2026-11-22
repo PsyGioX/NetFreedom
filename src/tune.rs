@@ -142,7 +142,7 @@ pub struct Scenario {
 }
 
 impl Scenario {
-    fn plan(&self) -> Option<Plan> {
+    pub(crate) fn plan(&self) -> Option<Plan> {
         let profile = self.profile?;
         let lean = profile.is_dedicated_lean();
         let gf = if lean {
@@ -264,7 +264,7 @@ fn unfixable_sites(results: &[Result1]) -> Vec<String> {
         .collect()
 }
 
-fn teardown(warp: Option<&Warp>) {
+pub(crate) fn teardown(warp: Option<&Warp>) {
     if let Some(w) = warp {
         w.disconnect();
         // Wait until the daemon is really down. Reconnecting while the previous session was still

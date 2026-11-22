@@ -43,7 +43,7 @@ cd NetFreedom
 Для сборки конкретного релиза переключитесь на его тег:
 
 ```bash
-git checkout v4.6.3
+git checkout v4.7.0
 ```
 
 Все команды ниже выполняются из корня репозитория.
@@ -147,7 +147,7 @@ cd ..
 
 ### 5. Архив
 
-Подставьте номер версии вместо `<версия>` (например, `4.6.3`):
+Подставьте номер версии вместо `<версия>` (например, `4.7.0`):
 
 ```bash
 tar -C package -czf NetFreedom-<версия>-linux-x64.tar.gz .
@@ -188,7 +188,7 @@ python3 tools/validate_strategies.py     # прогоняет все страт�
 
 ```bash
 set -euo pipefail
-VERSION=4.6.3                       # укажите нужную версию
+VERSION=4.7.0                       # укажите нужную версию
 
 cargo test --locked
 cargo build --release --locked
@@ -308,7 +308,7 @@ Get-FileHash "NetFreedom-<версия>-windows-x64.zip" -Algorithm SHA256
 
 ```powershell
 $ErrorActionPreference = 'Stop'
-$Version = '4.6.3'                  # укажите нужную версию
+$Version = '4.7.0'                  # укажите нужную версию
 
 cargo test --locked
 cargo build --release --locked
@@ -357,8 +357,8 @@ MSVC: так собираются официальные пакеты. Резу�
 Релиз в CI запускается пушем тега `v*`:
 
 ```bash
-git tag v4.6.3
-git push origin v4.6.3
+git tag v4.7.0
+git push origin v4.7.0
 ```
 
 Тогда же формируется аттестация сборки (`actions/attest-build-provenance`). Версия в теге должна
