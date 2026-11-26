@@ -96,22 +96,13 @@ mod tests {
         assert!(find("nope").is_none());
     }
 
-    /// The game scenarios exist to shrink the burst sent while a connection is set up; the numbers
-    /// in the README follow from these arguments, so the test pins them.
+    /// The game scenarios exist to shrink the burst sent while a connection is set up; the byte
+    /// counts live in `latency.rs` (computed from the arguments); here only the shape is pinned.
     #[test]
-    fn game_scenarios_send_a_smaller_burst_than_the_default() {
-        fn burst(name: &str) -> (u32, u32) {
-            let a = find(name).unwrap().lean.unwrap();
-            let rep = |i: usize| a[i..].iter().find_map(|x| x.strip_prefix("--dpi-desync-repeats=")).unwrap().parse::<u32>().unwrap();
-            let port = a.iter().position(|x| x.starts_with("--filter-udp=500")).unwrap();
-            (rep(0), rep(port))
-        }
-        let (q0, p0) = burst("warp");
-        for n in ["warp-esports", "warp-esports-ttl", "warp-lowburst", "warp-min"] {
+    fn game_scenarios_fake_the_first_packet_only() {
+        for n in ["warp", "warp-esports", "warp-esports-ttl", "warp-lowburst", "warp-min"] {
             let p = find(n).unwrap();
             assert!(p.is_dedicated_lean(), "{n} is a WARP strategy");
-            let (q, port) = burst(n);
-            assert!(q < q0 && port < p0, "{n}: {q}/{port} must be below {q0}/{p0}");
             assert!(p.lean.unwrap().contains(&"--dpi-desync-cutoff=n2"), "{n}: fakes on the first packet only");
         }
         assert!(find("warp-esports-ttl").unwrap().lean.unwrap().contains(&"--dpi-desync-ttl=5"));

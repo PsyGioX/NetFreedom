@@ -28,10 +28,10 @@ static S0: &[&str] = &[
     "--new",
     "--filter-udp=500,1701,4443,4500,8095,8443",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=12",
+    "--dpi-desync-repeats=6",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={BIN}stun.bin",
 ];
 
 static S1: &[&str] = &[
@@ -44,10 +44,10 @@ static S1: &[&str] = &[
     "--new",
     "--filter-udp=500,1701,4443,4500,8095,8443",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats=4",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={BIN}stun.bin",
 ];
 
 static S2: &[&str] = &[
@@ -75,10 +75,10 @@ static S3: &[&str] = &[
     "--new",
     "--filter-udp=500,1701,4443,4500,8095,8443",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=8",
+    "--dpi-desync-repeats=4",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={BIN}stun.bin",
     "--dpi-desync-ttl=6",
 ];
 
@@ -86,16 +86,16 @@ static S4: &[&str] = &[
     "--wf-raw={WFRAW}",
     "--filter-udp=443",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=8",
+    "--dpi-desync-repeats=3",
     "--dpi-desync-fake-quic={BIN}quic_initial_www_google_com.bin",
     "--dpi-desync-fake-quic={BIN}quic_initial_rutube_ru.bin",
     "--new",
     "--filter-udp=500,1701,4443,4500,8095,8443",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=12",
+    "--dpi-desync-repeats=6",
     "--dpi-desync-any-protocol=1",
-    "--dpi-desync-cutoff=n3",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-cutoff=n2",
+    "--dpi-desync-fake-unknown-udp={BIN}stun.bin",
 ];
 
 static S5: &[&str] = &[
@@ -110,7 +110,7 @@ static S5: &[&str] = &[
     "--dpi-desync-repeats=4",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={BIN}stun.bin",
 ];
 
 static S6: &[&str] = &[
@@ -126,7 +126,7 @@ static S6: &[&str] = &[
     "--dpi-desync-repeats=4",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={BIN}stun.bin",
     "--dpi-desync-ttl=5",
 ];
 
@@ -270,7 +270,7 @@ static S9: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -278,10 +278,10 @@ static S9: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S10: &[&str] = &[
@@ -399,7 +399,7 @@ static S10: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -407,10 +407,10 @@ static S10: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S11: &[&str] = &[
@@ -530,7 +530,7 @@ static S11: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -538,10 +538,10 @@ static S11: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S12: &[&str] = &[
@@ -654,7 +654,7 @@ static S12: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -662,10 +662,10 @@ static S12: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S13: &[&str] = &[
@@ -778,7 +778,7 @@ static S13: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -786,10 +786,10 @@ static S13: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S14: &[&str] = &[
@@ -902,7 +902,7 @@ static S14: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -910,10 +910,10 @@ static S14: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S15: &[&str] = &[
@@ -1026,7 +1026,7 @@ static S15: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -1034,10 +1034,10 @@ static S15: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S16: &[&str] = &[
@@ -1150,7 +1150,7 @@ static S16: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -1158,10 +1158,10 @@ static S16: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S17: &[&str] = &[
@@ -1274,7 +1274,7 @@ static S17: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -1282,10 +1282,10 @@ static S17: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S18: &[&str] = &[
@@ -1398,7 +1398,7 @@ static S18: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -1406,10 +1406,10 @@ static S18: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S19: &[&str] = &[
@@ -1522,7 +1522,7 @@ static S19: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -1530,10 +1530,10 @@ static S19: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S20: &[&str] = &[
@@ -1646,7 +1646,7 @@ static S20: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -1654,10 +1654,10 @@ static S20: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S21: &[&str] = &[
@@ -1777,7 +1777,7 @@ static S21: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -1785,10 +1785,10 @@ static S21: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S22: &[&str] = &[
@@ -1908,7 +1908,7 @@ static S22: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -1916,10 +1916,10 @@ static S22: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S23: &[&str] = &[
@@ -2041,7 +2041,7 @@ static S23: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -2049,10 +2049,10 @@ static S23: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S24: &[&str] = &[
@@ -2169,7 +2169,7 @@ static S24: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -2177,10 +2177,10 @@ static S24: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S25: &[&str] = &[
@@ -2310,7 +2310,7 @@ static S25: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -2318,10 +2318,10 @@ static S25: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S26: &[&str] = &[
@@ -2460,7 +2460,7 @@ static S26: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -2468,10 +2468,10 @@ static S26: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S27: &[&str] = &[
@@ -2610,7 +2610,7 @@ static S27: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -2618,10 +2618,10 @@ static S27: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S28: &[&str] = &[
@@ -2750,7 +2750,7 @@ static S28: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -2758,10 +2758,10 @@ static S28: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S29: &[&str] = &[
@@ -2878,7 +2878,7 @@ static S29: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -2886,10 +2886,10 @@ static S29: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S30: &[&str] = &[
@@ -3006,7 +3006,7 @@ static S30: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -3014,10 +3014,10 @@ static S30: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S31: &[&str] = &[
@@ -3147,7 +3147,7 @@ static S31: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -3155,10 +3155,10 @@ static S31: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S32: &[&str] = &[
@@ -3266,7 +3266,7 @@ static S32: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -3274,10 +3274,10 @@ static S32: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S33: &[&str] = &[
@@ -3385,7 +3385,7 @@ static S33: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -3393,10 +3393,10 @@ static S33: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S34: &[&str] = &[
@@ -3516,7 +3516,7 @@ static S34: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -3524,10 +3524,10 @@ static S34: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S35: &[&str] = &[
@@ -3652,7 +3652,7 @@ static S35: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -3660,10 +3660,10 @@ static S35: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S36: &[&str] = &[
@@ -3783,7 +3783,7 @@ static S36: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -3791,10 +3791,10 @@ static S36: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S37: &[&str] = &[
@@ -3914,7 +3914,7 @@ static S37: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -3922,10 +3922,10 @@ static S37: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S38: &[&str] = &[
@@ -4033,7 +4033,7 @@ static S38: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -4041,10 +4041,10 @@ static S38: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S39: &[&str] = &[
@@ -4152,7 +4152,7 @@ static S39: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -4160,10 +4160,10 @@ static S39: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S40: &[&str] = &[
@@ -4266,7 +4266,7 @@ static S40: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -4274,10 +4274,10 @@ static S40: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S41: &[&str] = &[
@@ -4370,7 +4370,7 @@ static S41: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -4378,10 +4378,10 @@ static S41: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S42: &[&str] = &[
@@ -4501,7 +4501,7 @@ static S42: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -4509,10 +4509,10 @@ static S42: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S43: &[&str] = &[
@@ -4647,7 +4647,7 @@ static S43: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -4655,10 +4655,10 @@ static S43: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S44: &[&str] = &[
@@ -4766,7 +4766,7 @@ static S44: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -4774,10 +4774,10 @@ static S44: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S45: &[&str] = &[
@@ -4895,7 +4895,7 @@ static S45: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -4903,10 +4903,10 @@ static S45: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S46: &[&str] = &[
@@ -5014,7 +5014,7 @@ static S46: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -5022,10 +5022,10 @@ static S46: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S47: &[&str] = &[
@@ -5133,7 +5133,7 @@ static S47: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -5141,10 +5141,10 @@ static S47: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S48: &[&str] = &[
@@ -5262,7 +5262,7 @@ static S48: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -5270,10 +5270,10 @@ static S48: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S49: &[&str] = &[
@@ -5386,7 +5386,7 @@ static S49: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -5394,10 +5394,10 @@ static S49: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S50: &[&str] = &[
@@ -5505,7 +5505,7 @@ static S50: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -5513,10 +5513,10 @@ static S50: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S51: &[&str] = &[
@@ -5629,7 +5629,7 @@ static S51: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -5637,10 +5637,10 @@ static S51: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S52: &[&str] = &[
@@ -5768,7 +5768,7 @@ static S52: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -5776,10 +5776,10 @@ static S52: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S53: &[&str] = &[
@@ -5907,7 +5907,7 @@ static S53: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -5915,10 +5915,10 @@ static S53: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S54: &[&str] = &[
@@ -6041,7 +6041,7 @@ static S54: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -6049,10 +6049,10 @@ static S54: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S55: &[&str] = &[
@@ -6160,7 +6160,7 @@ static S55: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -6168,10 +6168,10 @@ static S55: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S56: &[&str] = &[
@@ -6289,7 +6289,7 @@ static S56: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -6297,10 +6297,10 @@ static S56: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S57: &[&str] = &[
@@ -6413,7 +6413,7 @@ static S57: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -6421,10 +6421,10 @@ static S57: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 static S58: &[&str] = &[
@@ -6542,7 +6542,7 @@ static S58: &[&str] = &[
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
     "--dpi-desync-fooling=ts",
-    "--dpi-desync-repeats=4",
+    "--dpi-desync-repeats={GAME_TCP_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
     "--dpi-desync-fake-unknown={BIN}stun.bin",
@@ -6550,22 +6550,22 @@ static S58: &[&str] = &[
     "--filter-udp={GF_UDP}",
     "--ipset={LISTS}ipset-all.txt",
     "--dpi-desync=fake",
-    "--dpi-desync-repeats=6",
+    "--dpi-desync-repeats={GAME_REPEATS}",
     "--dpi-desync-any-protocol=1",
     "--dpi-desync-cutoff=n2",
-    "--dpi-desync-fake-unknown-udp={BIN}ACTIVE_GAME_UDP.bin",
+    "--dpi-desync-fake-unknown-udp={GAME_FAKE}",
 ];
 
 pub static PROFILES: &[crate::profiles::Profile] = &[
-    crate::profiles::Profile { name: "warp", desc: "WARP handshake only, 6 fake QUIC Initials (default; least overhead)", classic: None, lean: Some(S0) },
+    crate::profiles::Profile { name: "warp", desc: "WARP handshake only, 6 fake QUIC Initials, 100-byte fakes on the fallback ports (default)", classic: None, lean: Some(S0) },
     crate::profiles::Profile { name: "warp-mask", desc: "WARP handshake only, 4 fake Initials, each different and valid, browser-like (built-in engine)", classic: None, lean: Some(S1) },
-    crate::profiles::Profile { name: "warp-heavy", desc: "WARP handshake only, 11 fake Initials: for providers that need more noise", classic: None, lean: Some(S2) },
+    crate::profiles::Profile { name: "warp-heavy", desc: "WARP handshake only, 11 fake Initials and 1250-byte port fakes: for providers that need more noise", classic: None, lean: Some(S2) },
     crate::profiles::Profile { name: "warp-ttl", desc: "WARP handshake only, fakes expire before Cloudflare (TTL 6)", classic: None, lean: Some(S3) },
-    crate::profiles::Profile { name: "warp-mix", desc: "WARP handshake only, two different fake Initials per attempt", classic: None, lean: Some(S4) },
-    crate::profiles::Profile { name: "warp-esports", desc: "WARP handshake only, 3 fake Initials: about a third of the burst of the default", classic: None, lean: Some(S5) },
+    crate::profiles::Profile { name: "warp-mix", desc: "WARP handshake only, two different fake Initials, 3 copies of each", classic: None, lean: Some(S4) },
+    crate::profiles::Profile { name: "warp-esports", desc: "WARP handshake only, 3 fake Initials: half the burst of the default", classic: None, lean: Some(S5) },
     crate::profiles::Profile { name: "warp-esports-ttl", desc: "WARP handshake only, 3 fakes that expire after 5 hops (TTL 5)", classic: None, lean: Some(S6) },
     crate::profiles::Profile { name: "warp-min", desc: "WARP handshake only, 2 fake Initials and 100-byte port fakes: the smallest burst", classic: None, lean: Some(S7) },
-    crate::profiles::Profile { name: "warp-lowburst", desc: "WARP handshake only, 4 fake Initials; port rules use a 100-byte fake instead of 1250 bytes", classic: None, lean: Some(S8) },
+    crate::profiles::Profile { name: "warp-lowburst", desc: "WARP handshake only, 4 fake Initials; port rules use a 100-byte fake", classic: None, lean: Some(S8) },
     crate::profiles::Profile { name: "hostfake", desc: "fake ClientHello + hostfakesplit with a domestic name (ya.ru), ts: 8/10 in field reports", classic: Some(S9), lean: None },
     crate::profiles::Profile { name: "alt13", desc: "original ALT13: hostfakesplit mail.ru (8/10 in field reports)", classic: Some(S10), lean: None },
     crate::profiles::Profile { name: "disorder-ya", desc: "fake + out-of-order with a domestic SNI (ya.ru) (8/10 in field reports)", classic: Some(S11), lean: None },

@@ -106,8 +106,10 @@ fn main() {
     sys::console_init();
     let log = Layout::discover().map(|l| l.utils.join("crash.log")).unwrap_or_else(|_| std::env::temp_dir().join("netfreedom-crash.log"));
     crash::install(log.clone());
-    let saved_lang = Layout::discover().map(|l| Config::load_with_legacy(&l.cfg, &l.cfg_legacy).lang).unwrap_or_default();
-    ui::init_lang(&saved_lang);
+    let saved = Layout::discover().map(|l| Config::load_with_legacy(&l.cfg, &l.cfg_legacy)).unwrap_or_default();
+    ui::init_lang(&saved.lang);
+    nf::capture::set_full_fakes(saved.burst == "full");
+    ui::init_color();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (code, pause) = match crash::guard(|| dispatch(&args)) {
         Ok(r) => r,
@@ -161,9 +163,11 @@ fn dispatch(args: &[String]) -> (i32, bool) {
         }
         "list" => {
             let mut out = io::stdout().lock();
+            let bin = Layout::discover().map(|l| l.bin).unwrap_or_default();
             for p in profiles::PROFILES {
                 let kind = if p.is_dedicated_lean() { "warp  " } else { "bypass" };
-                if writeln!(out, "{kind} {:<11} {}", p.name, p.desc).is_err() {
+                let b = nf::latency::of_profile(p, &bin).worst();
+                if writeln!(out, "{kind} {:<16} {:>7}  {}", p.name, nf::latency::fmt_bytes(b, false), p.desc).is_err() {
                     break; // closed pipe (e.g. `| head`): stop quietly instead of panicking
                 }
             }
@@ -461,8 +465,16 @@ fn set_game_server(layout: &Layout) {
 }
 
 fn menu_item(key: &str, text: &str, hint: &str) {
-    let hint = if hint.is_empty() { String::new() } else { format!("  {}", ui::paint(ui::DIM, hint)) };
-    ui::say(&format!("  {}  {text}{hint}", ui::paint(ui::CYAN, &ui::paint(ui::BOLD, key))));
+    // 2 spaces + key cap (3) + space = 6 columns in front of the text; the hint goes in what is left
+    let room = ui::PANEL_W.saturating_sub(6 + ui::visible_len(text) + 2);
+    let hint = if hint.is_empty() || room < 6 { String::new() } else { format!("  {}", ui::paint(ui::DIM, &ui::clip(hint, room))) };
+    ui::say(&format!("  {} {text}{hint}", ui::badge(key)));
+}
+
+/// `лёгкая` / `full`: what is sent in front of a new game flow (see `capture::set_full_fakes`).
+fn burst_hint(layout: &Layout) -> String {
+    let c = Config::load_with_legacy(&layout.cfg, &layout.cfg_legacy);
+    if c.burst == "full" { ui::tr("полная: 1250 Б × 6", "full: 1250 B × 6").to_owned() } else { ui::tr("экономная: 100 Б × 2", "lean: 100 B × 2").to_owned() }
 }
 
 fn menu(layout: &Layout) -> (i32, bool) {
@@ -472,30 +484,35 @@ fn menu(layout: &Layout) -> (i32, bool) {
         ui::clear();
         dash::print();
         println!();
+        ui::say(&ui::section(ui::tr("РЕЖИМЫ", "MODES"), ui::PANEL_W));
         if active {
             menu_item("1", ui::tr("Остановить всё", "Stop everything"), ui::tr("отключить WARP и движок", "disconnect WARP and the engine"));
-            menu_item("3", ui::tr("Проверить качество сейчас", "Check quality now"), ui::tr("честный тест: сначала проверяет туннель", "an honest test: proves the tunnel first"));
+            menu_item("3", ui::tr("Проверить качество сейчас", "Check quality now"), ui::tr("сначала проверяет туннель", "proves the tunnel first"));
         } else {
-            menu_item("1", ui::tr("Игры через Cloudflare WARP", "Games via Cloudflare WARP"), ui::tr("снижает пинг и потери в играх", "lower ping and loss in games"));
+            menu_item("1", ui::tr("Игры через Cloudflare WARP", "Games via Cloudflare WARP"), ui::tr("меньше пинга и потерь", "lower ping and loss"));
             menu_item("2", ui::tr("Разблокировка сайтов, YouTube, Discord", "Unblock sites, YouTube, Discord"), ui::tr("без WARP", "no WARP"));
-            menu_item("3", ui::tr("Подобрать лучшую стратегию (tune)", "Find the best strategy (tune)"), ui::tr("тестирует всё на вашем соединении", "tests everything on your connection"));
+            menu_item("3", ui::tr("Подобрать лучшую стратегию (tune)", "Find the best strategy (tune)"), ui::tr("замер на вашем соединении", "measured on your link"));
         }
-        menu_item("N", ui::tr("Проверить сайт на блокировку по SNI", "Check a site for SNI blocking"), ui::tr("и найти обход без WARP", "and find a bypass without WARP"));
-        menu_item("4", ui::tr("Проверка пинга и потерь", "Check ping and packet loss"), "");
-        menu_item("5", ui::tr("IP игрового сервера", "Game server IP"), &current_target(layout));
+        ui::say(&ui::section(ui::tr("ПРОВЕРКА", "CHECKS"), ui::PANEL_W));
+        menu_item("4", ui::tr("Пинг, джиттер и потери", "Ping, jitter and packet loss"), &current_target(layout));
+        menu_item("N", ui::tr("Проверить сайт на блокировку по SNI", "Check a site for SNI blocking"), ui::tr("и найти обход", "and find a bypass"));
         menu_item("6", ui::tr("Диагностика (doctor)", "Diagnostics (doctor)"), "");
-        menu_item("7", ui::tr("Инструменты: списки, ipset, кэш Discord, автозапуск", "Tools: lists, ipset, Discord cache, autostart"), "");
+        ui::say(&ui::section(ui::tr("НАСТРОЙКИ", "SETTINGS"), ui::PANEL_W));
+        menu_item("5", ui::tr("IP игрового сервера", "Game server IP"), &current_target(layout));
+        menu_item("D", ui::tr("DNS (шифрованный)", "DNS (encrypted)"), &dns_hint(layout));
+        menu_item("B", ui::tr("Нагрузка на соединение", "Uplink burst"), &burst_hint(layout));
+        menu_item("7", ui::tr("Инструменты: списки, ipset, Discord, автозапуск", "Tools: lists, ipset, Discord, autostart"), "");
+        ui::say(&ui::section(ui::tr("ПОМОЩЬ", "HELP"), ui::PANEL_W));
         menu_item("8", ui::tr("Как установить Cloudflare WARP", "How to install Cloudflare WARP"), "");
         menu_item("9", ui::tr("О проекте", "About"), "");
-        menu_item("D", ui::tr("DNS (шифрованный)", "DNS (encrypted)"), &dns_hint(layout));
-        menu_item("S", ui::tr("Аварийная остановка", "Emergency stop"), ui::tr("если что-то осталось после сбоя", "if something is left after a crash"));
         menu_item("L", "Язык / Language", if ui::is_ru() { "RU → EN" } else { "EN → RU" });
+        menu_item("S", ui::tr("Аварийная остановка", "Emergency stop"), ui::tr("если что-то осталось после сбоя", "if something is left after a crash"));
         if !active {
             menu_item("U", ui::tr("Полное удаление", "Full uninstall"), "");
         }
         menu_item("0", ui::tr("Выход", "Exit"), if active { ui::tr("остановит всё", "stops everything") } else { "" });
         println!();
-        let keys = if active { "13456789NDSL0" } else { "123456789NDSLU0" };
+        let keys = if active { "13456789NDBSL0" } else { "123456789NDBSLU0" };
         match (ui::choice(ui::tr("Выбор: ", "Select: "), keys), active) {
             ('1', true) => {
                 run::stop_session();
@@ -562,6 +579,20 @@ fn menu(layout: &Layout) -> (i32, bool) {
             }
             ('S', _) => {
                 run::stop();
+                pause_back();
+            }
+            ('B', _) => {
+                let full = Config::load_with_legacy(&layout.cfg, &layout.cfg_legacy).burst == "full";
+                let next_full = !full;
+                save_cfg(layout, |c| c.burst = if next_full { "full".into() } else { String::new() });
+                nf::capture::set_full_fakes(next_full);
+                ui::say(&format!("\n  {}", ui::tr(
+                    if next_full { "Нагрузка: ПОЛНАЯ. Новые игровые потоки получают 6 фейков по 1250 Б (≈7,5 КБ). Нужно, если игра не заходит с экономной." } else { "Нагрузка: ЭКОНОМНАЯ. Новые игровые потоки получают 2 фейка по 100 Б (0,2 КБ): меньше всплеск на канале, меньше джиттер." },
+                    if next_full { "Burst: FULL. A new game flow gets 6 fakes of 1250 B (about 7.5 KB). Use it if a game does not connect with the lean one." } else { "Burst: LEAN. A new game flow gets 2 fakes of 100 B (0.2 KB): a smaller spike on the line, less jitter." },
+                )));
+                if active {
+                    ui::say(&format!("  {}", ui::tr("Действует с ближайшего запуска.", "Takes effect at the next start.")));
+                }
                 pause_back();
             }
             ('L', _) => {

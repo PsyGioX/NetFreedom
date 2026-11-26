@@ -1682,7 +1682,7 @@ mod tests {
         assert_eq!(plan.rules.len(), 2);
         assert_eq!(plan.rules[0].repeats, 6);
         assert!(plan.rules[0].fakes[U7::Quic as usize].len() == 1 && plan.rules[0].cutoff.is_none());
-        assert_eq!(plan.rules[1].repeats, 12);
+        assert_eq!(plan.rules[1].repeats, 6);
         assert!(plan.rules[1].any_protocol && plan.rules[1].fakes[U7::Unknown as usize].len() == 1);
         assert_eq!(plan.rules[1].cutoff, Some(2));
         assert!(plan.rules[1].matches_port(4500) && !plan.rules[1].matches_port(443));

@@ -21,8 +21,44 @@ use std::io::{self, BufRead, Write};
 
 const RESET: &str = "\x1b[0m";
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Colours on? `true` until [`init_color`] decides otherwise (tests and library users get colours).
+static COLOR: AtomicBool = AtomicBool::new(true);
+/// 256-colour palette available (the accent colour of the theme); otherwise the 8 basic colours.
+static RICH: AtomicBool = AtomicBool::new(false);
+/// Rounded box corners (`╭╮╰╯`): terminals with a modern font; the legacy console font may lack them.
+static ROUND: AtomicBool = AtomicBool::new(false);
+
+/// Colour policy. Off when `NO_COLOR` is set (https://no-color.org), when `NETFREEDOM_COLOR=0`,
+/// when `TERM=dumb`, or when stdout is not a terminal (a log file, a pipe: escape codes in a file
+/// are noise). `NETFREEDOM_COLOR=1` forces colours on.
+pub fn resolve_color(no_color: bool, force: Option<&str>, term: Option<&str>, is_tty: bool) -> bool {
+    match force.map(str::trim) {
+        Some("0") => return false,
+        Some("1") => return true,
+        _ => {}
+    }
+    !no_color && term != Some("dumb") && is_tty
+}
+
+pub fn init_color() {
+    use std::io::IsTerminal;
+    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    let on = resolve_color(env("NO_COLOR").is_some(), env("NETFREEDOM_COLOR").as_deref(), env("TERM").as_deref(), io::stdout().is_terminal());
+    COLOR.store(on, Ordering::Relaxed);
+    let term = env("TERM").unwrap_or_default();
+    // Windows 10+ consoles with virtual-terminal mode understand 256 colours; so do the usual Unix terminals
+    RICH.store(cfg!(windows) || term.contains("256") || env("COLORTERM").is_some() || env("TERM_PROGRAM").is_some(), Ordering::Relaxed);
+    ROUND.store(!cfg!(windows) || env("WT_SESSION").is_some() || env("TERM_PROGRAM").is_some(), Ordering::Relaxed);
+}
+
+pub fn color_on() -> bool {
+    COLOR.load(Ordering::Relaxed)
+}
+
 pub fn color(code: &str, msg: &str) {
-    println!("\x1b[{code}m{msg}{RESET}");
+    println!("{}", paint(code, msg));
 }
 pub fn info(msg: &str) {
     println!("{msg}");
@@ -31,16 +67,16 @@ pub fn cyan(msg: &str) {
     color("36", msg);
 }
 pub fn ok(msg: &str) {
-    println!("  \x1b[32m[OK]{RESET} {msg}");
+    println!("  {} {msg}", paint(GREEN, "[OK]"));
 }
 pub fn skip(msg: &str) {
     println!("  [--] {msg}");
 }
 pub fn warn(msg: &str) {
-    println!("  \x1b[33m[WARN]{RESET} {msg}");
+    println!("  {} {msg}", paint(YELLOW, "[WARN]"));
 }
 pub fn error(msg: &str) {
-    eprintln!("\x1b[31mERROR:{RESET} {msg}");
+    eprintln!("{} {msg}", paint(RED, "ERROR:"));
 }
 
 fn flush() {
@@ -124,7 +160,7 @@ pub fn say(msg: &str) {
 
 // ------------------------------------------------------------------------------------ language
 
-use std::sync::atomic::{AtomicBool, Ordering};
+
 
 static RU: AtomicBool = AtomicBool::new(true);
 
@@ -174,7 +210,48 @@ pub const DIM: &str = "90";
 pub const BOLD: &str = "1";
 
 pub fn paint(code: &str, s: &str) -> String {
-    format!("\x1b[{code}m{s}{RESET}")
+    if color_on() { format!("\x1b[{code}m{s}{RESET}") } else { s.to_owned() }
+}
+
+/// The accent colour of the theme (the blue of the logo): 256-colour where available.
+pub fn accent() -> &'static str {
+    if RICH.load(Ordering::Relaxed) { "38;5;75" } else { CYAN }
+}
+
+/// Accent colour for headings, bold.
+pub fn accent_bold(s: &str) -> String {
+    paint(&format!("1;{}", accent()), s)
+}
+
+/// A key cap for the menu: ` 1 ` on the accent colour; `[1]` without colours.
+pub fn badge(key: &str) -> String {
+    if !color_on() {
+        return format!("[{key}]");
+    }
+    let code = if RICH.load(Ordering::Relaxed) { "1;38;5;16;48;5;75" } else { "1;30;46" };
+    paint(code, &format!(" {key} "))
+}
+
+/// `── TITLE ─────────`: a dim section rule inside the menu (`width` columns).
+pub fn section(title: &str, width: usize) -> String {
+    let head = format!("── {title} ");
+    let fill = width.saturating_sub(visible_len(&head));
+    paint(DIM, &format!("{head}{}", "─".repeat(fill)))
+}
+
+/// A bar of `cells` cells filled to `frac` (0..1) with the given colour.
+pub fn meter(frac: f64, cells: usize, code: &str) -> String {
+    let filled = ((frac.clamp(0.0, 1.0) * cells as f64).round() as usize).min(cells);
+    format!("{}{}", paint(code, &"█".repeat(filled)), paint(DIM, &"░".repeat(cells - filled)))
+}
+
+/// Uplink burst of a strategy as a bar: a full bar is the old 15 KB, green up to ~2 KB, yellow up
+/// to ~8 KB, red above.
+pub fn load_bar(bytes: usize) -> String {
+    let code = if bytes <= 2_000 { GREEN } else if bytes <= 8_000 { YELLOW } else { RED };
+    // never an empty bar for a non-zero load: the smallest burst is still a burst
+    let frac = if bytes == 0 { 0.0 } else { (bytes as f64 / 15_000.0).max(0.1) };
+    meter(frac, 8, code)
 }
 
 /// Clears the screen and homes the cursor (only on a real terminal).
@@ -201,6 +278,35 @@ pub fn clear_below() {
         print!("\x1b[J");
         flush();
     }
+}
+
+/// Visible rows of the console window (not the scrollback buffer); 24 when it cannot be told.
+/// Used to cut long lists into pages that fit on one screen: a list taller than the window
+/// scrolls its top away, and the Windows console is bad at scrolling back.
+#[cfg(windows)]
+pub fn term_rows() -> usize {
+    use windows_sys::Win32::System::Console::*;
+    unsafe {
+        let mut info: CONSOLE_SCREEN_BUFFER_INFO = std::mem::zeroed();
+        if GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &mut info) != 0 {
+            let rows = i32::from(info.srWindow.Bottom) - i32::from(info.srWindow.Top) + 1;
+            if rows > 0 {
+                return rows as usize;
+            }
+        }
+    }
+    24
+}
+
+#[cfg(unix)]
+pub fn term_rows() -> usize {
+    unsafe {
+        let mut ws: libc::winsize = std::mem::zeroed();
+        if libc::ioctl(1, libc::TIOCGWINSZ, &mut ws) == 0 && ws.ws_row > 0 {
+            return ws.ws_row as usize;
+        }
+    }
+    24
 }
 
 /// Number of columns a string takes on screen (escape sequences are not counted).
@@ -252,18 +358,20 @@ pub fn wrap(s: &str, width: usize) -> Vec<String> {
     out
 }
 
-pub const PANEL_W: usize = 70;
+pub const PANEL_W: usize = 72;
 
-/// A box with a title: `┌─ title ───┐ │ line │ └────┘`.
+/// A box with a title: `╭─ title ───╮ │ line │ ╰────╯` (square corners on a legacy console font).
 pub fn panel(title: &str, lines: &[String]) {
     let inner = PANEL_W - 4;
+    let (tl, tr, bl, br) = if ROUND.load(Ordering::Relaxed) { ("╭", "╮", "╰", "╯") } else { ("┌", "┐", "└", "┘") };
     let head = format!(" {title} ");
     let fill = (PANEL_W - 2).saturating_sub(visible_len(&head) + 1);
-    let mut out = format!("┌─{}{}┐\n", paint(CYAN, &paint(BOLD, &head)), "─".repeat(fill));
+    let edge = |s: &str| paint(DIM, s);
+    let mut out = format!("{}{}{}{}\n", edge(&format!("{tl}─")), accent_bold(&head), edge(&"─".repeat(fill)), edge(tr));
     for l in lines {
-        out.push_str(&format!("│ {} │\n", pad(l, inner)));
+        out.push_str(&format!("{} {} {}\n", edge("│"), pad(l, inner), edge("│")));
     }
-    out.push_str(&format!("└{}┘", "─".repeat(PANEL_W - 2)));
+    out.push_str(&edge(&format!("{bl}{}{br}", "─".repeat(PANEL_W - 2))));
     say(&out);
 }
 
@@ -272,11 +380,11 @@ pub fn dot(code: &str) -> String {
 }
 
 pub fn kv(label: &str, value: &str) -> String {
-    format!("{} {}", paint(DIM, &pad(label, 10)), value)
+    format!("{} {}", paint(DIM, &pad(label, 11)), value)
 }
 
 pub fn heading(text: &str) {
-    say(&format!("\n{}", paint(BOLD, &paint(CYAN, text))));
+    say(&format!("\n{}", accent_bold(text)));
 }
 
 /// Latency as a 10-cell bar: full = fast. `good` ms or less fills it, `bad` ms or more empties it.
@@ -391,5 +499,24 @@ mod ui_tests {
         assert_eq!(visible_len(&latency_bar(10.0, 20.0, 120.0)), 10);
         assert!(latency_bar(10.0, 20.0, 120.0).contains("██████████"));
         assert!(latency_bar(500.0, 20.0, 120.0).contains("░░░░░░░░░░"));
+    }
+
+    #[test]
+    fn colour_policy() {
+        assert!(!resolve_color(true, None, Some("xterm"), true), "NO_COLOR wins");
+        assert!(!resolve_color(false, None, Some("dumb"), true));
+        assert!(!resolve_color(false, None, Some("xterm"), false), "a pipe gets no escape codes");
+        assert!(resolve_color(false, None, Some("xterm"), true));
+        assert!(resolve_color(true, Some("1"), None, false), "NETFREEDOM_COLOR=1 forces colour");
+        assert!(!resolve_color(false, Some("0"), Some("xterm"), true));
+    }
+
+    #[test]
+    fn bars_and_badges_have_fixed_width() {
+        for b in [0, 100, 1500, 7200, 15_000, 40_000] {
+            assert_eq!(visible_len(&load_bar(b)), 8, "{b}");
+        }
+        assert_eq!(visible_len(&badge("1")), 3);
+        assert_eq!(visible_len(&section("TITLE", PANEL_W)), PANEL_W);
     }
 }

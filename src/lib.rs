@@ -33,6 +33,7 @@ pub mod health;
 pub mod hostlist;
 pub mod http;
 pub mod ipset;
+pub mod latency;
 pub mod mask;
 pub mod netdiag;
 pub mod session;

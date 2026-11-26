@@ -47,6 +47,7 @@ GOOGLE_TLS = "{BIN}tls_clienthello_www_google_com.bin"
 GOOGLE_QUIC = "{BIN}quic_initial_www_google_com.bin"
 ACTIVE_UDP = "{BIN}ACTIVE_GAME_UDP.bin"
 ACTIVE_DISCORD = "{BIN}ACTIVE_DISCORD_UDP.bin"
+STUN = "{BIN}stun.bin"
 
 # Cloudflare WARP (MASQUE) endpoint ranges + UDP ports, selected by WinDivert itself.
 WFRAW = (
@@ -434,12 +435,14 @@ def classic(tech, r_quic):
         ["--filter-tcp=443", *IPSET_SOCIAL, *t],
         # game TCP: fakes only, first packets only, real data untouched (rule 2)
         ["--filter-tcp={GF_TCP}", *IPSET_ALL, "--dpi-desync=fake", "--dpi-desync-fooling=ts",
-         "--dpi-desync-repeats=4", "--dpi-desync-any-protocol=1", "--dpi-desync-cutoff=n2",
+         "--dpi-desync-repeats={GAME_TCP_REPEATS}", "--dpi-desync-any-protocol=1", "--dpi-desync-cutoff=n2",
          "--dpi-desync-fake-unknown=" + "{BIN}stun.bin"],
-        # game UDP: a few fakes on the first two packets of a flow, nothing more
-        ["--filter-udp={GF_UDP}", *IPSET_ALL, "--dpi-desync=fake", "--dpi-desync-repeats=6",
+        # game UDP: a few fakes in front of the first packet of a flow (cutoff=n2), nothing more.
+        # Lean by default: 2 x 100 bytes (0.2 KB per flow) instead of 6 x 1250 bytes (7.5 KB);
+        # `burst=full` in the settings brings the old payload back (see capture::set_full_fakes)
+        ["--filter-udp={GF_UDP}", *IPSET_ALL, "--dpi-desync=fake", "--dpi-desync-repeats={GAME_REPEATS}",
          "--dpi-desync-any-protocol=1", "--dpi-desync-cutoff=n2",
-         f"--dpi-desync-fake-unknown-udp={ACTIVE_UDP}"],
+         "--dpi-desync-fake-unknown-udp={GAME_FAKE}"],
     ]
     head = ["--wf-tcp=80,443,2053,2083,2087,2096,8443,{GF_TCP}", "--wf-udp=443,19294-19344,50000-50100,{GF_UDP}"]
     return flatten(segs, head)
@@ -468,29 +471,34 @@ def flatten(segs, head):
 # ------------------------------------------------------------------------------ the table
 # (name, description, classic args or None, lean args or None)
 STRATEGIES = [
-    ("warp", "WARP handshake only, 6 fake QUIC Initials (default; least overhead)",
-     None, lean(quic(6), 12, 2)),
+    # The fallback ports (500, 1701, 4443, ...) are rarely used by WARP, and a 1250-byte fake there
+    # cost 12 x 1250 = 15 KB of uplink per attempt. A 100-byte STUN-shaped fake does the same job
+    # on those ports (warp-lowburst has used it since 4.5) at 0.6 KB. Several fake files multiply:
+    # the engine sends every file `repeats` times (warp-mix: 2 files). `warp-heavy` keeps the old
+    # 1250-byte payload for providers that need it.
+    ("warp", "WARP handshake only, 6 fake QUIC Initials, 100-byte fakes on the fallback ports (default)",
+     None, lean(quic(6), 6, 2, port_fake=STUN)),
     ("warp-mask", "WARP handshake only, 4 fake Initials, each different and valid, browser-like (built-in engine)",
-     None, lean(quic(4, MASK_MIX), 6, 2)),
-    ("warp-heavy", "WARP handshake only, 11 fake Initials: for providers that need more noise",
+     None, lean(quic(4, MASK_MIX), 4, 2, port_fake=STUN)),
+    ("warp-heavy", "WARP handshake only, 11 fake Initials and 1250-byte port fakes: for providers that need more noise",
      None, lean(quic(11), 10, 4)),
     ("warp-ttl", "WARP handshake only, fakes expire before Cloudflare (TTL 6)",
-     None, lean(quic(6), 8, 2, extra=["--dpi-desync-ttl=6"])),
-    ("warp-mix", "WARP handshake only, two different fake Initials per attempt",
-     None, lean(["--dpi-desync=fake", "--dpi-desync-repeats=8", f"--dpi-desync-fake-quic={GOOGLE_QUIC}",
-                 "--dpi-desync-fake-quic={BIN}quic_initial_rutube_ru.bin"], 12, 3)),
+     None, lean(quic(6), 4, 2, extra=["--dpi-desync-ttl=6"], port_fake=STUN)),
+    ("warp-mix", "WARP handshake only, two different fake Initials, 3 copies of each",
+     None, lean(["--dpi-desync=fake", "--dpi-desync-repeats=3", f"--dpi-desync-fake-quic={GOOGLE_QUIC}",
+                 "--dpi-desync-fake-quic={BIN}quic_initial_rutube_ru.bin"], 6, 2, port_fake=STUN)),
     # Competitive games. The strategy only runs while a connection is being set up (and when WARP
     # re-handshakes), never on game packets, so what it can change is the size of the burst that
     # leaves your uplink at that moment: a burst of N x 1.2 KB fakes occupies a slow uplink for
     # N x 2 ms (at 5 Mbit/s) and shows up as a jitter spike. These three trade fakes for burst.
-    ("warp-esports", "WARP handshake only, 3 fake Initials: about a third of the burst of the default",
-     None, lean(quic(3), 4, 2)),
+    ("warp-esports", "WARP handshake only, 3 fake Initials: half the burst of the default",
+     None, lean(quic(3), 4, 2, port_fake=STUN)),
     ("warp-esports-ttl", "WARP handshake only, 3 fakes that expire after 5 hops (TTL 5)",
-     None, lean(quic(3), 4, 2, extra=["--dpi-desync-ttl=5"])),
+     None, lean(quic(3), 4, 2, extra=["--dpi-desync-ttl=5"], port_fake=STUN)),
     ("warp-min", "WARP handshake only, 2 fake Initials and 100-byte port fakes: the smallest burst",
-     None, lean(quic(2), 3, 2, port_fake="{BIN}stun.bin")),
-    ("warp-lowburst", "WARP handshake only, 4 fake Initials; port rules use a 100-byte fake instead of 1250 bytes",
-     None, lean(quic(4), 6, 2, port_fake="{BIN}stun.bin")),
+     None, lean(quic(2), 3, 2, port_fake=STUN)),
+    ("warp-lowburst", "WARP handshake only, 4 fake Initials; port rules use a 100-byte fake",
+     None, lean(quic(4), 6, 2, port_fake=STUN)),
 ]
 BYPASS = [
     # evidence order (see "evidence-driven family"): the three measured winners, then the

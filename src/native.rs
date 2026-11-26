@@ -159,6 +159,11 @@ pub fn stop_other_instances() -> usize {
     ended
 }
 
+/// Longest wait of a packet in the WinDivert queue. Far above what a healthy engine needs (a
+/// packet is handled in microseconds, a burst of fakes in a few milliseconds), far below the
+/// 2 s default.
+const QUEUE_TIME_MS: u64 = 250;
+
 static ACTIVE: Mutex<Option<Native>> = Mutex::new(None);
 
 fn explain(code: u32) -> &'static str {
@@ -219,10 +224,15 @@ pub fn start(bin_dir: &str, plan: Plan) -> Result<(), String> {
     // A longer, larger queue: a connection start is a burst (fakes and split pieces go out
     // while the next packets are already waiting), and a packet that sat in a full queue is
     // dropped by the driver. 0 = QUEUE_LENGTH (default 4096, max 16384), 2 = QUEUE_SIZE (default 4 MB, max 32 MB).
+    // 1 = QUEUE_TIME (default 2000 ms, range 20..16000): how long a packet may sit in the queue
+    // before the driver drops it. A packet that waited a second is worse than a dropped one for
+    // a game (TCP resends it, a game resends or ignores it), and a deep queue behind a stalled
+    // engine thread is exactly what shows up as a latency spike on the whole machine.
     if let Some(set) = api.set_param {
         unsafe {
             set(handle, 0, 16_384);
             set(handle, 2, 16 * 1024 * 1024);
+            set(handle, 1, QUEUE_TIME_MS);
         }
     }
     // Before the threads exist: timer resolution is process-wide, and the flusher's sleep below

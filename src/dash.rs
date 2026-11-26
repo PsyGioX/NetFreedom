@@ -19,6 +19,8 @@
 
 use crate::backend;
 use crate::session::{self, Mode};
+use crate::latency;
+use crate::profiles::Profile;
 use crate::ui::{self, clip, dot, kv, paint, tr, DIM, GREEN, RED, YELLOW};
 use crate::util::{fmt_dur, fmt_ms};
 
@@ -40,9 +42,42 @@ fn mode_name(m: Mode) -> &'static str {
     }
 }
 
+/// `████░░░░ 7,2 КБ на соединение · 0,6 КБ запасные порты`: what the strategy puts on the uplink
+/// when a flow starts. Counted from the engine's own arguments (`latency.rs`), once per call.
+pub fn burst_line(p: &Profile) -> Option<String> {
+    let bin = crate::paths::Layout::discover().ok()?.bin;
+    let b = latency::of_profile(p, &bin);
+    let ru = ui::is_ru();
+    let (c, g) = (latency::fmt_bytes(b.connect, ru), latency::fmt_bytes(b.game, ru));
+    let tail = if p.is_dedicated_lean() {
+        format!("{c} {} · {g} {}", tr("рукопожатие", "handshake"), tr("запасные порты", "fallback ports"))
+    } else {
+        format!("{c} {} · {g} {}", tr("на соединение", "per connection"), tr("игровой поток", "per game flow"))
+    };
+    Some(format!("{} {}", ui::load_bar(b.worst()), clip(&tail, 56)))
+}
+
+/// The scenario that will start when stopped, with its uplink burst.
+fn scenario_rows(p: &Profile) -> Vec<String> {
+    let mut v = Vec::new();
+    let label = tr("Сценарий", "Scenario");
+    v.push(kv(label, &format!("{} {}", ui::accent_bold(p.name), paint(DIM, &format!("· {}", if p.is_dedicated_lean() { tr("игры через WARP", "games via WARP") } else { tr("обход без WARP", "bypass, no WARP") })))));
+    if let Some(b) = burst_line(p) {
+        v.push(kv(tr("Нагрузка", "Burst"), &b));
+    }
+    v
+}
+
 pub fn lines() -> Vec<String> {
     let Some(a) = session::active() else {
         let mut v = vec![format!("{} {}", dot(DIM), paint(DIM, tr("ОСТАНОВЛЕНО — выберите режим ниже", "STOPPED: pick a mode below")))];
+        if let Ok(l) = crate::paths::Layout::discover() {
+            let c = crate::config::Config::load_with_legacy(&l.cfg, &l.cfg_legacy);
+            let last = crate::profiles::find(&c.profile).filter(|p| p.is_dedicated_lean()).or_else(|| crate::profiles::find(crate::profiles::DEFAULT_PROFILE));
+            if let Some(p) = last {
+                v.extend(scenario_rows(p));
+            }
+        }
         if backend::engine_running() {
             v.push(format!("{} {}", dot(YELLOW), tr("Движок запущен другим окном или после сбоя — пункт «Остановить всё» (S)", "An engine is running (other window or a crash): use “Stop everything” (S)")));
         }
@@ -75,6 +110,10 @@ pub fn lines() -> Vec<String> {
             (_, _) => (YELLOW, tr("сбои проверки", "check failing").to_owned()),
         };
         v.push(kv("DNS", &format!("{} {} · {} · {}", dot(c), p.title, t.label(), state)));
+    }
+
+    if let Some(b) = burst_line(a.plan.profile) {
+        v.push(kv(tr("Нагрузка", "Burst"), &b));
     }
 
     let eng = if engine_alive { format!("{} {}", dot(GREEN), tr("работает", "running")) } else { format!("{} {}", dot(RED), tr("остановлен", "stopped")) };

@@ -23,6 +23,34 @@ pub const ALL_PORTS: &str = "1024-65535";
 /// A harmless port used to "disable" a protocol in templates that always mention it.
 const DUMMY_PORT: &str = "12";
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Size of what leaves the uplink when a game flow starts. `false` (the default): a 100-byte STUN
+/// shaped fake, 2 repeats. `true` (`burst=full` in the settings, `--burst full`): the 1250-byte
+/// payload of the original game filter, 6 repeats (7.5 KB in front of the first packet of every
+/// flow, `cutoff=n2` stops the fakes after it). The fakes only exist while a flow is being set up,
+/// but a burst of that size on a slow uplink is a latency spike for everything else that is
+/// running, the game included.
+static FULL_FAKES: AtomicBool = AtomicBool::new(false);
+
+pub fn set_full_fakes(full: bool) {
+    FULL_FAKES.store(full, Ordering::Relaxed);
+}
+
+pub fn full_fakes() -> bool {
+    FULL_FAKES.load(Ordering::Relaxed)
+}
+
+/// `{GAME_FAKE}` / `{GAME_REPEATS}` / `{GAME_TCP_REPEATS}`: the game-flow fakes, see [`set_full_fakes`].
+fn game_var(name: &str, full: bool) -> Option<(&'static str, &'static str)> {
+    match name {
+        "{GAME_FAKE}" => Some(if full { ("{GAME_FAKE}", "{BIN}ACTIVE_GAME_UDP.bin") } else { ("{GAME_FAKE}", "{BIN}stun.bin") }),
+        "{GAME_REPEATS}" => Some(("{GAME_REPEATS}", if full { "6" } else { "2" })),
+        "{GAME_TCP_REPEATS}" => Some(("{GAME_TCP_REPEATS}", if full { "4" } else { "2" })),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GfMode {
     Disabled,
@@ -134,6 +162,20 @@ pub struct Vars<'a> {
 
 /// Expands `{BIN}`, `{LISTS}`, `{WFRAW}`, `{GF_TCP}`, `{GF_UDP}` in one pass per token.
 pub fn expand(template: &[&str], v: &Vars) -> Vec<String> {
+    expand_with(template, v, full_fakes())
+}
+
+/// [`expand`] with an explicit choice of the game-flow fakes (`full` = `burst=full`).
+pub fn expand_with(template: &[&str], v: &Vars, full: bool) -> Vec<String> {
+    let game = |t: &str| -> String {
+        let mut s = t.to_owned();
+        for k in ["{GAME_FAKE}", "{GAME_REPEATS}", "{GAME_TCP_REPEATS}"] {
+            if let Some((k, val)) = game_var(k, full) {
+                s = s.replace(k, val);
+            }
+        }
+        s
+    };
     let vars = [
         ("{BIN}", v.bin),
         ("{LISTS}", v.lists),
@@ -147,8 +189,9 @@ pub fn expand(template: &[&str], v: &Vars) -> Vec<String> {
             out.push((*t).to_owned());
             continue;
         }
+        let t = game(t);
         let mut s = String::with_capacity(t.len() + 48);
-        let mut rest = *t;
+        let mut rest = t.as_str();
         while let Some(i) = rest.find('{') {
             s.push_str(&rest[..i]);
             let tail = &rest[i..];

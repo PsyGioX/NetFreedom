@@ -40,11 +40,14 @@ pub struct Config {
     pub dns_strict: bool,
     /// DNS: on a system without an encrypted-DNS client (Windows 10) accept the provider's plain DNS.
     pub dns_plain: bool,
+    /// Fakes sent in front of a new game flow: empty / `lean` = 100 bytes x 2, `full` = the old
+    /// 1250 bytes x 6 (see `capture::set_full_fakes`).
+    pub burst: String,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { profile: String::new(), bypass: String::new(), mode: 1, cap: 1, tcp: String::new(), udp: String::new(), target: String::new(), lang: String::new(), dns: String::new(), dns_strict: false, dns_plain: false }
+        Self { profile: String::new(), bypass: String::new(), mode: 1, cap: 1, tcp: String::new(), udp: String::new(), target: String::new(), lang: String::new(), dns: String::new(), dns_strict: false, dns_plain: false, burst: String::new() }
     }
 }
 
@@ -66,6 +69,7 @@ impl Config {
                 "dns" => c.dns = v.to_ascii_lowercase(),
                 "dns_strict" => c.dns_strict = v == "1",
                 "dns_plain" => c.dns_plain = v == "1",
+                "burst" => c.burst = v.to_ascii_lowercase().replace("lean", "").replace(|ch: char| !ch.is_ascii_alphanumeric(), ""),
                 _ => {}
             }
         }
@@ -74,8 +78,8 @@ impl Config {
 
     pub fn render(&self) -> String {
         format!(
-            "profile={}\nbypass={}\nmode={}\ncap={}\ntcp={}\nudp={}\ntarget={}\nlang={}\ndns={}\ndns_strict={}\ndns_plain={}\n",
-            self.profile, self.bypass, self.mode, self.cap, self.tcp, self.udp, self.target, self.lang, self.dns, u8::from(self.dns_strict), u8::from(self.dns_plain)
+            "profile={}\nbypass={}\nmode={}\ncap={}\ntcp={}\nudp={}\ntarget={}\nlang={}\ndns={}\ndns_strict={}\ndns_plain={}\nburst={}\n",
+            self.profile, self.bypass, self.mode, self.cap, self.tcp, self.udp, self.target, self.lang, self.dns, u8::from(self.dns_strict), u8::from(self.dns_plain), self.burst
         )
     }
 
@@ -99,7 +103,7 @@ mod tests {
 
     #[test]
     fn roundtrip_and_legacy_files() {
-        let c = Config { profile: "warp".into(), bypass: "split".into(), mode: 3, cap: 2, tcp: "80".into(), udp: "3074".into(), target: "203.0.113.7".into(), lang: "ru".into(), dns: "quad9".into(), dns_strict: true, dns_plain: false };
+        let c = Config { profile: "warp".into(), bypass: "split".into(), mode: 3, cap: 2, tcp: "80".into(), udp: "3074".into(), target: "203.0.113.7".into(), lang: "ru".into(), dns: "quad9".into(), dns_strict: true, dns_plain: false, burst: "full".into() };
         assert_eq!(Config::parse(&c.render()), c);
         // file written by the BAT launcher (CRLF, .bat suffix kept as is)
         let old = Config::parse("profile=general (ALT).bat\r\nmode=2\r\ncap=1\r\ntcp=\r\nudp=\r\n");
@@ -110,5 +114,8 @@ mod tests {
         // settings written before DNS existed load with the DNS left alone
         let before_dns = Config::parse("profile=warp\nmode=1\n");
         assert_eq!((before_dns.dns.as_str(), before_dns.dns_strict, before_dns.dns_plain), ("", false, false));
+        // `lean` is the default and is stored as an empty value
+        assert_eq!(Config::parse("burst=lean\n").burst, "");
+        assert_eq!(Config::parse("burst=FULL\n").burst, "full");
     }
 }

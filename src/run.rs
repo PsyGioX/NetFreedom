@@ -50,6 +50,8 @@ pub struct StartArgs {
     pub headless: bool,
     /// Encrypted DNS for this session (`cloudflare` / `google` / `quad9` / `auto` / `off`); remembered.
     pub dns: Option<String>,
+    /// `lean` / `full`: fakes in front of a new game flow (see `capture::set_full_fakes`); remembered.
+    pub burst: Option<String>,
 }
 
 impl StartArgs {
@@ -79,6 +81,13 @@ impl StartArgs {
                     crate::dns::Choice::parse(&v)?;
                     a.dns = Some(v);
                 }
+                "--burst" => {
+                    let v = value("--burst")?.to_ascii_lowercase();
+                    if v != "lean" && v != "full" {
+                        return Err("--burst must be lean or full".into());
+                    }
+                    a.burst = Some(v);
+                }
                 "--verbose" | "-v" => a.verbose = true,
                 // 2.x switches: the choice is now implied by the strategy itself
                 "--lean" | "--classic" => {}
@@ -98,6 +107,10 @@ pub struct Plan {
     pub mode: u8,
 }
 
+fn layout_bin() -> String {
+    crate::paths::Layout::discover().map(|l| l.bin).unwrap_or_default()
+}
+
 fn choose_profile(cfg: &Config, arg: &Option<String>, bypass: bool, headless: bool) -> Result<&'static Profile, String> {
     if let Some(name) = arg {
         let p = profiles::find(name).ok_or_else(|| format!("unknown strategy \"{name}\" (see `netfreedom list`)"))?;
@@ -115,19 +128,83 @@ fn choose_profile(cfg: &Config, arg: &Option<String>, bypass: bool, headless: bo
     println!();
     println!("{}", if bypass { "Select a bypass strategy (no WARP):" } else { "Select a strategy (WARP strategies = least overhead, recommended):" });
     let shown: Vec<&'static Profile> = profiles::PROFILES.iter().filter(|p| !bypass || p.is_bypass()).collect();
-    let mut last_idx = None;
-    for (i, p) in shown.iter().enumerate() {
-        let is_last = last.is_some_and(|l| std::ptr::eq(l, *p));
-        if is_last {
-            last_idx = Some(i + 1);
+    let last_idx = last.and_then(|l| shown.iter().position(|p| std::ptr::eq(l, *p))).map(|i| i + 1);
+    pick_from_list(&shown, last_idx, &layout_bin())
+}
+
+/// Does the strategy match a filter typed by the person (name or description, any case)?
+fn matches_filter(p: &Profile, f: &str) -> bool {
+    let f = f.to_lowercase();
+    p.name.to_lowercase().contains(&f) || p.desc.to_lowercase().contains(&f)
+}
+
+/// Strategy picker that fits the window. There are ~60 strategies; printed in one go they scroll
+/// off the screen (and the Windows console scrolls back badly), so the list is shown a page at a
+/// time, sized to the window height. Numbers are the same on every page and under any filter.
+///   <number> pick | Enter = last used | N / P next / previous page | text = filter | / = reset
+fn pick_from_list(shown: &[&'static Profile], last_idx: Option<usize>, bin: &str) -> Result<&'static Profile, String> {
+    let mut filter = String::new();
+    let mut page = 0usize;
+    loop {
+        let view: Vec<usize> = (0..shown.len()).filter(|&i| filter.is_empty() || matches_filter(shown[i], &filter)).collect();
+        // rows kept for the header, the footer and the prompt
+        let per = ui::term_rows().saturating_sub(8).clamp(5, 60);
+        let pages = view.len().div_ceil(per).max(1);
+        page = page.min(pages - 1);
+        println!("{}", ui::paint(ui::DIM, "  *  #  strategy         burst"));
+        for &i in view.iter().skip(page * per).take(per) {
+            let p = shown[i];
+            let is_last = last_idx == Some(i + 1);
+            let b = crate::latency::of_profile(p, bin);
+            let mark = if is_last { ui::paint(ui::GREEN, "*") } else { " ".to_owned() };
+            println!(" {mark} {:>2}. {:<16} {} {:>7}  {}", i + 1, p.name, ui::load_bar(b.worst()), crate::latency::fmt_bytes(b.worst(), false), ui::clip(p.desc, 30));
         }
-        println!("  {:>2}. {:<11} {}{}", i + 1, p.name, p.desc, if is_last { "   <-- last used" } else { "" });
+        if view.is_empty() {
+            println!("  {}", tr("Ничего не найдено. / - сбросить фильтр.", "Nothing matches. / resets the filter."));
+        }
+        let filt = if filter.is_empty() { String::new() } else { format!("  [{}: {filter}]", tr("фильтр", "filter")) };
+        println!("{}", ui::paint(ui::DIM, &format!(
+            "  {} {}/{} ({}){filt}",
+            tr("Страница", "Page"), page + 1, pages, view.len()
+        )));
+        println!("{}", ui::paint(ui::DIM, tr(
+            "  номер = выбрать, N/P = страница, текст = поиск, / = все, * = прошлый",
+            "  number = pick, N/P = page, text = filter, / = all, * = last used",
+        )));
+        let def = last_idx.map(|i| i.to_string()).unwrap_or_default();
+        if def.is_empty() {
+            print!("{}: ", tr("Номер", "Enter number"));
+        } else {
+            print!("{} [Enter = {def}]: ", tr("Номер", "Enter number"));
+        }
+        let Some(answer) = ui::read_line_opt() else {
+            return Err("input closed".to_string());
+        };
+        let answer = if answer.is_empty() { def } else { answer };
+        if answer.is_empty() {
+            continue;
+        }
+        if let Ok(n) = answer.parse::<usize>() {
+            return shown.get(n.wrapping_sub(1)).copied().ok_or_else(|| "Invalid number.".to_string());
+        }
+        let mut chars = answer.chars();
+        let single = match (chars.next(), chars.next()) {
+            (Some(c), None) => Some(ui::fold_key(c).to_ascii_lowercase()),
+            _ => None,
+        };
+        match single {
+            Some('n') | Some('>') => page = (page + 1).min(pages - 1),
+            Some('p') | Some('<') => page = page.saturating_sub(1),
+            Some('/') => {
+                filter.clear();
+                page = 0;
+            }
+            _ => {
+                filter = answer;
+                page = 0;
+            }
+        }
     }
-    println!();
-    let def = last_idx.map(|i| i.to_string()).unwrap_or_default();
-    let answer = ui::ask("Enter number", &def);
-    let n: usize = answer.parse().map_err(|_| "Invalid number.".to_string())?;
-    shown.get(n.wrapping_sub(1)).copied().ok_or_else(|| "Invalid number.".to_string())
 }
 
 fn bypass_names() -> String {
@@ -387,8 +464,12 @@ fn apply_dns(layout: &Layout, cfg: &Config, mode: Mode) {
     }
 }
 
-/// Remembers `--dns` in the settings.
+/// Remembers `--dns` and `--burst` in the settings (and applies `--burst` at once).
 fn remember_dns(cfg: &mut Config, a: &StartArgs) {
+    if let Some(b) = &a.burst {
+        cfg.burst = if b == "full" { "full".into() } else { String::new() };
+        crate::capture::set_full_fakes(b == "full");
+    }
     if let Some(v) = &a.dns {
         if let Ok(c) = crate::dns::Choice::parse(v) {
             cfg.dns = c.key().to_owned();
