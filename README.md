@@ -10,6 +10,10 @@
   <a href="https://github.com/PsyGioX/NetFreedom/stargazers"><img alt="Звёзды" src="https://img.shields.io/github/stars/PsyGioX/NetFreedom?style=flat-square&color=6b93ff&labelColor=0b1030"></a>
 </p>
 
+## 📸 Скриншот NetFreedom
+
+![NetFreedom — интерфейс утилиты](https://raw.githubusercontent.com/PsyGioX/NetFreedom/main/screenshot_netfreedom.png)
+
 <p align="center">
   <b><a href="https://netfreedom.netlify.app/">Сайт</a></b> &nbsp;·&nbsp;
   <a href="#-быстрый-старт">Быстрый старт</a> &nbsp;·&nbsp;
